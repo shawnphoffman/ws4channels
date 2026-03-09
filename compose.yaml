@@ -1,0 +1,118 @@
+# SHARED-NUC (10/2025)
+x-common: &common
+  restart: unless-stopped
+  # mem_limit: 1g
+  # mem_reservation: 512m
+  environment: &env
+    # PUID: 1000
+    # PGID: 1000
+    TZ: America/Los_Angeles
+  # networks:
+  #   - proxy_net
+  # logging:
+  #   driver: json-file
+  #   options:
+  #     max-size: 10m
+  #     max-file: 3
+
+x-health: &health
+  interval: 5m
+  timeout: 10s
+  retries: 5
+  start_period: 1m
+
+# =================================================================
+# networks:
+#   proxy_net:
+#     external: true
+
+# =================================================================
+name: weather-channels
+services:
+  # ================================
+  # weatherstar-4000
+  # ================================
+  ws4kp:
+    image: ghcr.io/netbymatt/ws4kp:latest
+    container_name: ws4kp
+    <<: *common
+    environment:
+      <<: *env
+      # Each argument in the permalink URL can become an environment variable on the Docker host by adding WSQS_
+      # Following the "Sharing a Permalink" example below, here are a few environment variables defined. Visit that section for a
+      # more complete list of configuration options.
+      # ====
+      # WSQS_latLonQuery: Orlando International Airport Orlando FL USA
+      # WSQS_hazards_checkbox: true
+      # WSQS_current_weather_checkbox: true
+      # WSQS_kiosk: true
+      # ====
+      WSQS_hazards-checkbox: true
+      WSQS_current-weather-checkbox: true
+      WSQS_latest-observations-checkbox: true
+      WSQS_hourly-checkbox: false
+      WSQS_hourly-graph-checkbox: true
+      WSQS_travel-checkbox: false
+      WSQS_regional-forecast-checkbox: true
+      WSQS_local-forecast-checkbox: true
+      WSQS_extended-forecast-checkbox: true
+      WSQS_almanac-checkbox: true
+      WSQS_spc-outlook-checkbox: true
+      WSQS_radar-checkbox: true
+      WSQS_settings-wide-checkbox: true
+      WSQS_settings-kiosk-checkbox: false
+      # WSQS_settings-kiosk-checkbox: true
+      # WSQS_settings-stickyKiosk-checkbox: false
+      # WSQS_settings-customTextEnable-checkbox: false
+      WSQS_settings-speed-select: 1.00
+      # WSQS_settings-scanLineMode-select: auto
+      WSQS_settings-units-select: us
+      WSQS_txtLocation: South+Lake+Tahoe%2C+CA%2C+USA
+      # WSQS_settings-customText-string:
+      # WSQS_share-link-url:
+      # WSQS_settings-scanLines-checkbox: false
+      # WSQS_settings-mediaVolume-select: 0.75
+      WSQS_latLonQuery: South+Lake+Tahoe%2C+CA%2C+USA
+      # WSQS_latLon: %7B%22lat%22%3A38.9416%2C%22lon%22%3A-119.9772%7D
+    # ================================
+    ports:
+      - 8080:8080 # change the first 8080 to meet your local network needs
+    # ================================
+    healthcheck:
+      test: curl -f http://localhost:8080 || exit 1
+      <<: *health
+    # ================================
+
+  # ================================
+  # ws4k -> channels dvr
+  #   - https://github.com/rice9797/ws4channels
+  #   - */playlist.m3u
+  #   - */guide.xml
+  # ================================
+  ws4channels:
+    build: .
+    container_name: ws4channels
+    <<: *common
+    depends_on:
+      ws4kp:
+        condition: service_healthy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1096m
+    #       cpus: 1
+    environment:
+      <<: *env
+      ZIP_CODE: 96150
+      # WS4KP_HOST: ws4kp_host
+      # WS4KP_PORT: ws4kp_port
+      WS4KP_HOST: ws4kp
+      WS4KP_PORT: 8080
+    # ================================
+    ports:
+      - 9798:9798
+    # ================================
+    healthcheck:
+      test: curl -f http://localhost:9798/guide.xml || exit 1
+      <<: *health
+    # ================================
