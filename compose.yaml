@@ -1,19 +1,9 @@
-# SHARED-NUC (10/2025)
 x-common: &common
   restart: unless-stopped
-  # mem_limit: 1g
-  # mem_reservation: 512m
   environment: &env
-    # PUID: 1000
-    # PGID: 1000
     TZ: America/Los_Angeles
   # networks:
   #   - proxy_net
-  # logging:
-  #   driver: json-file
-  #   options:
-  #     max-size: 10m
-  #     max-file: 3
 
 x-health: &health
   interval: 5m
@@ -76,7 +66,7 @@ services:
       # WSQS_latLon: %7B%22lat%22%3A38.9416%2C%22lon%22%3A-119.9772%7D
     # ================================
     ports:
-      - 8080:8080 # change the first 8080 to meet your local network needs
+      - ${PORT:-8080}:8080 # change the first 8080 to meet your local network needs
     # ================================
     healthcheck:
       test: curl -f http://localhost:8080 || exit 1
@@ -103,20 +93,12 @@ services:
     #       cpus: 1
     environment:
       <<: *env
-      # ZIP_CODE: 96150
-      # WS4KP_HOST: ws4kp_host
-      # WS4KP_PORT: ws4kp_port
       WS4KP_HOST: ws4kp
       WS4KP_PORT: 8080
       FRAME_RATE: 5
-    # volumes:
-    # - type: tmpfs
-    #   target: /app/output
-    #   tmpfs:
-    #     size: 50000000  # 50MB is plenty for 3 HLS segments
     # ================================
     ports:
-      - 9798:9798
+      - ${STREAM_PORT:-9798}:9798
     # ================================
     healthcheck:
       test: curl -f http://localhost:9798/guide.xml || exit 1
