@@ -34,7 +34,8 @@ const OUTPUT_DIR = path.join(__dirname, 'output')
 const AUDIO_DIR = path.join(__dirname, 'music')
 const LOGO_DIR = path.join(__dirname, 'logo')
 const HLS_FILE = path.join(OUTPUT_DIR, 'stream.m3u8')
-const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.jpg')
+// const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.jpg')
+const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.png')
 const WARMUP_DIR = path.join(__dirname, 'warmup_hls')
 const AUDIO_LIST = path.join(__dirname, 'audio_list.txt')
 
@@ -48,6 +49,7 @@ app.use('/logo', express.static(LOGO_DIR))
 
 let ffmpegProc = null
 let ffmpegStream = null
+let audioFeeder = null // child ffmpeg process that pipes audio to FIFO
 let browser = null
 let page = null
 let captureInterval = null
@@ -158,7 +160,7 @@ function generateWarmupHLS() {
 	console.log('[ws4channels] Pre-rendering warmup HLS segments...')
 	const { codec, extra } = parseVideoOptions()
 
-	// Generate 4 seconds (2 segments) of static warmup video
+	// Generate 2 seconds (1 segment) of static warmup video
 	const result = spawnSync(
 		'ffmpeg',
 		[
@@ -176,7 +178,7 @@ function generateWarmupHLS() {
 			codec,
 			...extra,
 			'-t',
-			'8',
+			'2',
 			'-f',
 			'hls',
 			'-hls_time',
@@ -206,30 +208,90 @@ function deployWarmup() {
 		.sort()
 	if (!warmupSegments.length) return
 
-	// Copy segment files to output
+	// Copy segment files to output dir so static file serving can find them
 	for (const seg of warmupSegments) {
 		fs.copyFileSync(path.join(WARMUP_DIR, seg), path.join(OUTPUT_DIR, seg))
 	}
 
-	// Write a live-type playlist. No EXT-X-ENDLIST so the player keeps polling.
-	// The playlist stays static — same segments, same sequence number.
-	// The player will poll, see no changes, and hold on the last frame.
-	// When live ffmpeg starts, it overwrites this file with real segments.
-	const m3u8 = `#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:3
-#EXT-X-MEDIA-SEQUENCE:0
-${warmupSegments.map(s => `#EXTINF:2.000,\n${s}`).join('\n')}
-`
-	fs.writeFileSync(HLS_FILE, m3u8)
-
+	isBrowserReady = false
 	isStreamReady = true
 	console.log(`[ws4channels] Warmup deployed (${warmupSegments.length} segments)`)
 }
 
+// ─── Audio feeder ────────────────────────────────────────────────────────────
+// Spawns a separate ffmpeg that reads mp3s at realtime (-re) and outputs raw
+// PCM audio to a named FIFO pipe. The main ffmpeg reads from this FIFO as a
+// file input, but since it's a pipe, it can only read at the rate data arrives.
+// This prevents the audio read-ahead that caused the desync/buffering issues.
+
+const AUDIO_FIFO = path.join(OUTPUT_DIR, 'audio_fifo')
+
+function startAudioFeeder() {
+	stopAudioFeeder()
+
+	// Create named FIFO if it doesn't exist
+	try {
+		fs.unlinkSync(AUDIO_FIFO)
+	} catch {}
+	spawnSync('mkfifo', [AUDIO_FIFO])
+
+	const { spawn } = require('child_process')
+	audioFeeder = spawn(
+		'ffmpeg',
+		[
+			'-re',
+			'-f',
+			'concat',
+			'-safe',
+			'0',
+			'-stream_loop',
+			'-1',
+			'-i',
+			AUDIO_LIST,
+			'-vn',
+			'-af',
+			'volume=0.5',
+			'-f',
+			's16le',
+			'-acodec',
+			'pcm_s16le',
+			'-ar',
+			'44100',
+			'-ac',
+			'2',
+			'-y',
+			AUDIO_FIFO,
+		],
+		{ stdio: ['pipe', 'pipe', 'pipe'] },
+	)
+
+	audioFeeder.stderr.on('data', () => {}) // suppress stderr
+	audioFeeder.on('error', err => {
+		console.warn('[ws4channels] Audio feeder error:', err.message)
+	})
+	audioFeeder.on('exit', () => {
+		audioFeeder = null
+	})
+
+	console.log('[ws4channels] Audio feeder started')
+}
+
+function stopAudioFeeder() {
+	if (audioFeeder) {
+		try {
+			audioFeeder.kill('SIGINT')
+		} catch {}
+		audioFeeder = null
+	}
+	try {
+		fs.unlinkSync(AUDIO_FIFO)
+	} catch {}
+}
+
 // ─── FFmpeg: live mode ────────────────────────────────────────────────────────
-// Starts ffmpeg reading JPEG screenshots from pipe. Video only, no audio.
-// Overwrites the warmup playlist with live content.
+// Starts ffmpeg reading JPEG screenshots from stdin pipe + PCM audio from a
+// named FIFO. The video pipe is stdin, the audio is a FIFO that behaves like
+// a pipe (blocks until data is available). No read-ahead on either input.
 
 function switchToLiveFFmpeg() {
 	return new Promise((resolve, reject) => {
@@ -243,6 +305,9 @@ function switchToLiveFFmpeg() {
 			ffmpegProc = null
 		}
 
+		// Start audio feeder — writes PCM to the FIFO
+		startAudioFeeder()
+
 		ffmpegStream = new PassThrough()
 		const { codec, extra } = parseVideoOptions()
 
@@ -250,10 +315,16 @@ function switchToLiveFFmpeg() {
 			.input(ffmpegStream)
 			.inputFormat('image2pipe')
 			.inputOptions(['-c:v mjpeg', `-framerate ${FRAME_RATE}`])
+			.input(AUDIO_FIFO)
+			.inputOptions(['-f s16le', '-ar 44100', '-ac 2'])
 			.outputOptions([
-				'-an',
 				'-vf',
 				'scale=1280:720,format=yuv420p',
+				'-c:a aac',
+				'-b:a 128k',
+				'-async',
+				'1',
+				'-shortest',
 				'-g',
 				String(FRAME_RATE * 2),
 				'-keyint_min',
@@ -276,7 +347,7 @@ function switchToLiveFFmpeg() {
 			.videoCodec(codec)
 			.output(HLS_FILE)
 			.on('start', () => {
-				console.log('[ws4channels] Live ffmpeg started')
+				console.log('[ws4channels] Live ffmpeg started (with audio)')
 				isBrowserReady = true
 				restartDelay = 1000
 				resolve()
@@ -285,6 +356,7 @@ function switchToLiveFFmpeg() {
 				console.error('[ws4channels] Live FFmpeg error:', err.message)
 				isBrowserReady = false
 				ffmpegProc = null
+				stopAudioFeeder()
 				if (ffmpegStream) {
 					ffmpegStream.destroy()
 					ffmpegStream = null
@@ -299,6 +371,7 @@ function switchToLiveFFmpeg() {
 			.on('end', () => {
 				ffmpegProc = null
 				ffmpegStream = null
+				stopAudioFeeder()
 				isBrowserReady = false
 			})
 
@@ -351,6 +424,8 @@ async function startBrowserCapture() {
 			if (!ffmpegProc || !ffmpegStream || !page) return
 			try {
 				if (page.isClosed()) {
+					// Only relaunch if we're still supposed to be capturing
+					if (!isBrowserReady) return
 					await launchBrowser()
 					return
 				}
@@ -361,6 +436,8 @@ async function startBrowserCapture() {
 				})
 				if (ffmpegStream?.writable) ffmpegStream.write(screenshot)
 			} catch (err) {
+				// Don't relaunch if we're shutting down
+				if (!isBrowserReady) return
 				console.warn('[ws4channels] Capture error:', err.message)
 				await launchBrowser().catch(() => {})
 			}
@@ -390,6 +467,7 @@ async function shutdownBrowser() {
 		ffmpegStream.destroy()
 		ffmpegStream = null
 	}
+	stopAudioFeeder()
 	if (browser) {
 		await browser.close().catch(() => {})
 		browser = null
@@ -420,6 +498,7 @@ async function stopEverything() {
 		ffmpegStream.destroy()
 		ffmpegStream = null
 	}
+	stopAudioFeeder()
 	if (ffmpegProc) {
 		try {
 			ffmpegProc.kill('SIGINT')
@@ -451,7 +530,8 @@ function resetIdleTimer() {
 // ─── On-demand wake-up middleware ─────────────────────────────────────────────
 
 app.use('/stream', async (req, res, next) => {
-	if (req.path.endsWith('.ts')) {
+	// Wake browser on any stream request
+	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
 		if (!browser && !isStartingBrowser) {
 			console.log('[ws4channels] Viewer detected — waking browser...')
@@ -468,6 +548,46 @@ app.use('/stream', async (req, res, next) => {
 	}
 
 	next()
+})
+
+// Warmup sequence counter — increments each poll so the player sees "new" content
+let warmupSeq = 0
+
+// Serve the m3u8 dynamically
+app.get('/stream/stream.m3u8', (req, res) => {
+	res.set('Content-Type', 'application/vnd.apple.mpegurl')
+	res.set('Cache-Control', 'no-cache, no-store')
+
+	// If live ffmpeg has written a playlist, serve it directly
+	const filePath = path.join(OUTPUT_DIR, 'stream.m3u8')
+	if (isBrowserReady && fs.existsSync(filePath)) {
+		res.send(fs.readFileSync(filePath, 'utf8'))
+		return
+	}
+
+	// Warmup — serve the same .ts segment with an incrementing sequence number.
+	// The player sees a new sequence each poll, re-fetches the segment, and keeps
+	// showing the warmup image. Without this, the player stalls on a static playlist.
+	const warmupSegments = fs
+		.readdirSync(WARMUP_DIR)
+		.filter(f => f.endsWith('.ts'))
+		.sort()
+	if (!warmupSegments.length) {
+		res.status(404).end()
+		return
+	}
+
+	// Add EXT-X-DISCONTINUITY before the segment so the player doesn't
+	// try to match timestamps between "old" and "new" segments (they're the same file)
+	res.send(`#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:3
+#EXT-X-MEDIA-SEQUENCE:${warmupSeq}
+#EXT-X-DISCONTINUITY
+#EXTINF:2.000,
+${warmupSegments[0]}
+`)
+	warmupSeq++
 })
 
 app.use('/stream', express.static(OUTPUT_DIR))
