@@ -103,11 +103,17 @@ services:
     #       cpus: 1
     environment:
       <<: *env
-      ZIP_CODE: 96150
+      # ZIP_CODE: 96150
       # WS4KP_HOST: ws4kp_host
       # WS4KP_PORT: ws4kp_port
       WS4KP_HOST: ws4kp
       WS4KP_PORT: 8080
+      FRAME_RATE: 5
+    # volumes:
+    # - type: tmpfs
+    #   target: /app/output
+    #   tmpfs:
+    #     size: 50000000  # 50MB is plenty for 3 HLS segments
     # ================================
     ports:
       - 9798:9798

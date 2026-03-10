@@ -10,27 +10,22 @@ const app = express()
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const VERSION = '3.0'
-const ZIP_CODE = process.env.ZIP_CODE || '90210'
+const VERSION = '4.0'
 const WS4KP_HOST = process.env.WS4KP_HOST || 'localhost'
 const WS4KP_PORT = process.env.WS4KP_PORT || '8080'
 const STREAM_PORT = process.env.STREAM_PORT || '9798'
 const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
 const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
-// const HLS_SETUP_DELAY = 2000
-const HLS_SETUP_DELAY = 800
 
-// Idle shutdown: stop the pipeline after this many seconds with no viewers.
-// Set to 0 to disable (always-on, original behavior).
 const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '120') * 1000
 
-// Hardware transcoding examples (set via environment variable):
+// Hardware transcoding — set VIDEO_OPTIONS env var:
 //   NVIDIA NVENC : -c:v h264_nvenc -pix_fmt yuv420p -b:v 2000k
 //   Intel QSV    : -c:v h264_qsv -b:v 1000k
 //   AMD VAAPI    : -vaapi_device /dev/dri/renderD128 -c:v h264_vaapi -b:v 1000k -vf format=nv12,hwupload
-//   Software     : (default) -c:v libx264 -preset ultrafast -b:v 1000k
-const VIDEO_OPTIONS = process.env.VIDEO_OPTIONS || '-c:v libx264 -preset ultrafast -b:v 1000k'
+//   Software     : (default) -c:v libx264 -preset ultrafast -b:v 500k
+const VIDEO_OPTIONS = process.env.VIDEO_OPTIONS || '-c:v libx264 -preset ultrafast -b:v 500k'
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +33,8 @@ const OUTPUT_DIR = path.join(__dirname, 'output')
 const AUDIO_DIR = path.join(__dirname, 'music')
 const LOGO_DIR = path.join(__dirname, 'logo')
 const HLS_FILE = path.join(OUTPUT_DIR, 'stream.m3u8')
+const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.jpg')
+const AUDIO_LIST = path.join(__dirname, 'audio_list.txt')
 
 ;[OUTPUT_DIR, AUDIO_DIR, LOGO_DIR].forEach(dir => {
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
@@ -47,15 +44,18 @@ app.use('/logo', express.static(LOGO_DIR))
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
-let ffmpegProc = null
-let ffmpegStream = null
-let browser = null
+let ffmpegProc = null // single ffmpeg process, always running
+let ffmpegStream = null // PassThrough pipe feeding frames to ffmpeg
+let browser = null // null when idle
 let page = null
-let captureInterval = null
+let warmupInterval = null // pumps warmup image frames into the pipe
+let captureInterval = null // pumps browser screenshots into the pipe
 let isStreamReady = false
-let isStarting = false
+let isBrowserReady = false // true once live screenshots are flowing
+let isStartingBrowser = false
 let idleTimer = null
-let restartDelay = 1000 // exponential backoff for error restarts
+let restartDelay = 1000
+let warmupScaledData = null // pre-loaded JPEG buffer of the warmup image
 
 const waitFor = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -92,14 +92,20 @@ function createAudioInputFile() {
 	} catch {
 		files = defaultMp3s
 	}
-	// Shuffle
 	for (let i = files.length - 1; i > 0; i--) {
 		const j = Math.floor(Math.random() * (i + 1))
 		;[files[i], files[j]] = [files[j], files[i]]
 	}
-	const audioList = files.map(f => `file '${path.join(AUDIO_DIR, f)}'`).join('\n')
-	fs.writeFileSync(path.join(__dirname, 'audio_list.txt'), audioList)
+	fs.writeFileSync(AUDIO_LIST, files.map(f => `file '${path.join(AUDIO_DIR, f)}'`).join('\n'))
 	console.log(`[ws4channels] Loaded ${files.length} music files`)
+}
+
+function parseVideoOptions() {
+	const opts = VIDEO_OPTIONS.trim().split(/\s+/)
+	const codecIndex = opts.indexOf('-c:v')
+	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
+	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
+	return { codec, extra }
 }
 
 function generateXMLTV(host) {
@@ -126,207 +132,323 @@ function generateXMLTV(host) {
 	return xml + '\n</tv>'
 }
 
-// ─── Idle timer ──────────────────────────────────────────────────────────────
-// Called every time a viewer fetches a segment. Resets the countdown.
+// ─── Warmup image ────────────────────────────────────────────────────────────
 
-function resetIdleTimer() {
-	if (IDLE_TIMEOUT_MS <= 0) return // disabled
-	if (idleTimer) clearTimeout(idleTimer)
-	idleTimer = setTimeout(async () => {
-		console.log('[ws4channels] No viewers — shutting down pipeline to save resources.')
-		await stopTranscoding()
-	}, IDLE_TIMEOUT_MS)
+function ensureWarmupImage() {
+	if (!fs.existsSync(WARMUP_IMAGE)) {
+		console.log('[ws4channels] No warmup.jpg found — generating a placeholder image')
+		require('child_process').spawnSync('ffmpeg', [
+			'-y',
+			'-f',
+			'lavfi',
+			'-i',
+			'color=c=0x1a1a2e:size=1280x720:rate=1',
+			'-vframes',
+			'1',
+			'-q:v',
+			'2',
+			WARMUP_IMAGE,
+		])
+	}
+	// Scale warmup to 1280x720 JPEG for pipe consistency with live screenshots
+	console.log('[ws4channels] Preparing warmup image at 1280x720')
+	const WARMUP_SCALED = path.join(LOGO_DIR, 'warmup_scaled.jpg')
+	require('child_process').spawnSync('ffmpeg', [
+		'-y',
+		'-i',
+		WARMUP_IMAGE,
+		'-vf',
+		'scale=1280:720',
+		'-vframes',
+		'1',
+		'-q:v',
+		'5',
+		WARMUP_SCALED,
+	])
+	// Overwrite the warmup reference to use the scaled version
+	warmupScaledData = fs.readFileSync(WARMUP_SCALED)
 }
 
-// ─── Browser ─────────────────────────────────────────────────────────────────
+// ─── Single FFmpeg pipeline ──────────────────────────────────────────────────
+// One ffmpeg process runs for the entire lifetime of the app.
+// It reads PNG frames from a PassThrough pipe + looped audio.
+// We swap what gets written to the pipe: warmup image frames or live screenshots.
+// No process restarts, no HLS discontinuities, seamless transitions.
 
-async function startBrowser() {
-	if (browser) await browser.close().catch(() => {})
-	browser = await puppeteer.launch({
-		headless: true,
-		args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-infobars', '--ignore-certificate-errors', '--window-size=1280,720'],
-		defaultViewport: null,
-	})
-	page = await browser.newPage()
-	// await page.goto(WS4KP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-	await page.goto(WS4KP_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-	// try {
-	// 	const zipInput = await page.waitForSelector('input[placeholder="Zip or City, State"], input', { timeout: 5000 })
-	// 	if (zipInput) {
-	// 		await zipInput.type(ZIP_CODE, { delay: 100 })
-	// 		await waitFor(1000)
-	// 		await page.keyboard.press('ArrowDown')
-	// 		await waitFor(500)
-	// 		const goButton = await page.$('button[type="submit"]')
-	// 		if (goButton) await goButton.click()
-	// 		else await zipInput.press('Enter')
-	// 		await page.waitForSelector('div.weather-display, #weather-content', { timeout: 30000 })
-	// 	}
-	// } catch {
-	// 	/* page may already show weather */
-	// }
-	await page.setViewport({ width: 1280, height: 720 })
-}
+function startFFmpeg() {
+	return new Promise((resolve, reject) => {
+		if (ffmpegProc) {
+			resolve()
+			return
+		}
 
-// ─── Pipeline start / stop ───────────────────────────────────────────────────
-
-async function startTranscoding() {
-	if (isStarting || ffmpegProc) return
-	isStarting = true
-	console.log('[ws4channels] Starting pipeline...')
-
-	try {
-		await startBrowser()
-		createAudioInputFile()
-
-		// Parse VIDEO_OPTIONS into an array so fluent-ffmpeg handles them correctly.
-		// A plain string like "-c:v h264_nvenc -b:v 2000k" must become ["-c:v","h264_nvenc",…]
-		const videoOpts = VIDEO_OPTIONS.trim().split(/\s+/)
-		// Separate codec flag (-c:v …) from everything else (bitrate, pix_fmt, hwupload filters…)
-		// We'll pass the whole lot as outputOptions after removing -c:v which goes to .videoCodec()
-		const codecIndex = videoOpts.indexOf('-c:v')
-		const codec = codecIndex !== -1 ? videoOpts[codecIndex + 1] : 'libx264'
-		// Build remaining options without the -c:v pair
-		const extraVideoOpts = videoOpts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
-
+		ensureWarmupImage()
 		ffmpegStream = new PassThrough()
+		const { codec, extra } = parseVideoOptions()
 
 		ffmpegProc = ffmpeg()
 			.input(ffmpegStream)
 			.inputFormat('image2pipe')
-			.inputOptions([`-framerate ${FRAME_RATE}`])
-			.input(path.join(__dirname, 'audio_list.txt'))
-			.inputOptions(['-f concat', '-safe 0', '-stream_loop -1'])
-			.complexFilter(['[0:v]scale=1280:720[v]', '[1:a]volume=0.5[a]'])
+			.inputOptions(['-re', '-c:v mjpeg', `-framerate ${FRAME_RATE}`, '-thread_queue_size 16'])
+			.input(AUDIO_LIST)
+			.inputOptions(['-f concat', '-safe 0', '-stream_loop -1', '-thread_queue_size 512'])
+			.complexFilter(['[0:v]scale=1280:720,format=yuv420p[v]', '[1:a]volume=0.5[a]'])
 			.outputOptions([
 				'-map [v]',
 				'-map [a]',
 				'-c:a aac',
 				'-b:a 128k',
-				...extraVideoOpts, // hardware-specific flags (pix_fmt, bitrate, etc.)
+				'-shortest',
+				'-fflags +genpts',
+				...extra,
 				'-f hls',
 				'-hls_time 2',
 				'-hls_list_size 3',
-				'-hls_flags delete_segments+append_list',
+				'-hls_flags delete_segments',
 			])
-			.videoCodec(codec) // respects hw codec string
+			.videoCodec(codec)
 			.output(HLS_FILE)
 			.on('start', cmd => {
-				console.log(`[ws4channels] v${VERSION} — ffmpeg started`)
-				console.log(`[ws4channels] codec: ${codec}  extra: ${extraVideoOpts.join(' ') || '(none)'}`)
+				console.log('[ws4channels] FFmpeg pipeline started')
+				console.log('[ws4channels] FFmpeg cmd:', cmd)
+				// Begin pumping warmup frames immediately
+				startWarmupFrames()
 				setTimeout(() => {
 					isStreamReady = true
-				}, HLS_SETUP_DELAY)
-				restartDelay = 1000 // reset backoff on successful start
+					resolve()
+				}, 2000)
 			})
-			.on('error', async err => {
+			.on('stderr', line => {
+				console.log('[ffmpeg]', line)
+			})
+			.on('error', err => {
 				console.error('[ws4channels] FFmpeg error:', err.message)
-				await stopTranscoding()
-				// Exponential backoff: 1s → 2s → 4s … up to 30s
-				console.log(`[ws4channels] Restarting in ${restartDelay / 1000}s…`)
-				await waitFor(restartDelay)
+				ffmpegProc = null
+				isStreamReady = false
+				isBrowserReady = false
+				stopWarmupFrames()
+				stopCaptureFrames()
+				if (ffmpegStream) {
+					ffmpegStream.destroy()
+					ffmpegStream = null
+				}
+				// Attempt restart
+				setTimeout(() => {
+					console.log('[ws4channels] Restarting FFmpeg pipeline...')
+					startFFmpeg()
+						.then(() => {
+							if (browser) switchToLiveCapture()
+						})
+						.catch(() => {})
+				}, restartDelay)
 				restartDelay = Math.min(restartDelay * 2, 30000)
-				startTranscoding()
 			})
 			.on('end', () => {
+				console.log('[ws4channels] FFmpeg ended unexpectedly')
 				ffmpegProc = null
 				ffmpegStream = null
 				isStreamReady = false
+				isBrowserReady = false
 			})
 
-		captureInterval = setInterval(async () => {
-			if (!ffmpegProc || !ffmpegStream || !page) return
-			try {
-				if (page.isClosed()) {
-					await startBrowser()
-					return
-				}
-				const screenshot = await page.screenshot({
-					type: 'jpeg',
-					clip: { x: 4, y: 50, width: 840, height: 470 },
-				})
-				ffmpegStream.write(screenshot)
-			} catch (err) {
-				console.warn('[ws4channels] Capture error, retrying:', err.message)
-				await startBrowser()
-			}
-		}, 1000 / FRAME_RATE)
-
 		ffmpegProc.run()
-	} catch (err) {
-		console.error('[ws4channels] Failed to start pipeline:', err)
-		isStarting = false
-		await stopTranscoding()
-		await waitFor(restartDelay)
-		restartDelay = Math.min(restartDelay * 2, 30000)
-		startTranscoding()
-		return
-	}
-
-	isStarting = false
+	})
 }
 
-async function stopTranscoding() {
-	if (idleTimer) {
-		clearTimeout(idleTimer)
-		idleTimer = null
+// ─── Frame sources ───────────────────────────────────────────────────────────
+// Only one source writes to the pipe at a time: warmup OR live capture.
+
+function startWarmupFrames() {
+	stopWarmupFrames()
+	if (!warmupScaledData) {
+		console.error('[ws4channels] No warmup data loaded!')
+		return
 	}
+	console.log('[ws4channels] Pumping warmup frames')
+	warmupInterval = setInterval(() => {
+		if (ffmpegStream?.writable) ffmpegStream.write(warmupScaledData)
+	}, 1000 / FRAME_RATE)
+}
+
+function stopWarmupFrames() {
+	if (warmupInterval) {
+		clearInterval(warmupInterval)
+		warmupInterval = null
+	}
+}
+
+function startCaptureFrames() {
+	stopCaptureFrames()
+	console.log('[ws4channels] Pumping live browser frames')
+	captureInterval = setInterval(async () => {
+		if (!ffmpegStream?.writable || !page) return
+		try {
+			if (page.isClosed()) {
+				console.warn('[ws4channels] Page closed, relaunching browser...')
+				await launchBrowser()
+				return
+			}
+			const screenshot = await page.screenshot({
+				type: 'jpeg',
+				quality: 80,
+				clip: { x: 4, y: 50, width: 840, height: 470 },
+			})
+			if (ffmpegStream?.writable) ffmpegStream.write(screenshot)
+		} catch (err) {
+			console.warn('[ws4channels] Capture error:', err.message)
+			await launchBrowser().catch(() => {})
+		}
+	}, 1000 / FRAME_RATE)
+}
+
+function stopCaptureFrames() {
 	if (captureInterval) {
 		clearInterval(captureInterval)
 		captureInterval = null
 	}
-	isStreamReady = false
+}
 
+// Seamless switch: stop warmup frames, start live capture frames.
+// Same pipe, same ffmpeg — no discontinuity.
+function switchToLiveCapture() {
+	stopWarmupFrames()
+	startCaptureFrames()
+	isBrowserReady = true
+	restartDelay = 1000
+	console.log('[ws4channels] Switched to live capture (seamless)')
+}
+
+// Switch back to warmup frames when browser shuts down.
+function switchToWarmupCapture() {
+	stopCaptureFrames()
+	isBrowserReady = false
+	startWarmupFrames()
+	console.log('[ws4channels] Switched to warmup frames (seamless)')
+}
+
+// ─── Browser ─────────────────────────────────────────────────────────────────
+
+async function launchBrowser() {
+	if (browser) await browser.close().catch(() => {})
+	browser = await puppeteer.launch({
+		headless: 'new',
+		args: [
+			'--no-sandbox',
+			'--disable-setuid-sandbox',
+			'--disable-dev-shm-usage',
+			'--disable-infobars',
+			'--ignore-certificate-errors',
+			'--window-size=1280,720',
+			'--no-first-run',
+			'--no-zygote',
+			'--disable-extensions',
+		],
+		defaultViewport: null,
+	})
+	page = await browser.newPage()
+	await page.goto(WS4KP_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+	try {
+		await page.waitForSelector('div#container', { timeout: 15000 })
+		await waitFor(2000) // let weather data load and render
+	} catch {
+		console.warn('[ws4channels] Container element not found, capturing anyway')
+	}
+	await page.setViewport({ width: 1280, height: 720 })
+	// Save a debug screenshot for troubleshooting
+	await page.screenshot({ path: path.join(OUTPUT_DIR, 'debug.png'), fullPage: true }).catch(() => {})
+	console.log('[ws4channels] Browser ready')
+}
+
+async function startBrowserAndCapture() {
+	if (isStartingBrowser) return
+	isStartingBrowser = true
+	console.log('[ws4channels] Starting browser...')
+
+	try {
+		if (!browser) await launchBrowser()
+		switchToLiveCapture()
+	} catch (err) {
+		console.error('[ws4channels] Browser startup failed:', err.message)
+		// Stay on warmup frames — no disruption to the stream
+	} finally {
+		isStartingBrowser = false
+	}
+}
+
+async function shutdownBrowser() {
+	console.log('[ws4channels] Shutting down browser (idle)')
+	isStartingBrowser = false
+
+	if (idleTimer) {
+		clearTimeout(idleTimer)
+		idleTimer = null
+	}
+
+	// Switch pipe back to warmup — no ffmpeg restart needed
+	switchToWarmupCapture()
+
+	if (browser) {
+		await browser.close().catch(() => {})
+		browser = null
+		page = null
+	}
+}
+
+async function stopEverything() {
+	if (idleTimer) {
+		clearTimeout(idleTimer)
+		idleTimer = null
+	}
+	stopWarmupFrames()
+	stopCaptureFrames()
+	if (ffmpegStream) {
+		ffmpegStream.destroy()
+		ffmpegStream = null
+	}
 	if (ffmpegProc) {
 		try {
 			ffmpegProc.kill('SIGINT')
 		} catch {}
 		ffmpegProc = null
 	}
-	if (ffmpegStream) {
-		try {
-			ffmpegStream.destroy()
-		} catch {}
-		ffmpegStream = null
-	}
 	if (browser) {
 		await browser.close().catch(() => {})
 		browser = null
 		page = null
 	}
-
-	// Clean up stale HLS segments so the next start isn't confusing to players
+	isStreamReady = isBrowserReady = false
 	try {
 		fs.readdirSync(OUTPUT_DIR)
 			.filter(f => f.endsWith('.ts') || f.endsWith('.m3u8'))
 			.forEach(f => fs.unlinkSync(path.join(OUTPUT_DIR, f)))
 	} catch {}
+	console.log('[ws4channels] Fully stopped.')
+}
 
-	console.log('[ws4channels] Pipeline stopped.')
+// ─── Idle timer ───────────────────────────────────────────────────────────────
+
+function resetIdleTimer() {
+	if (IDLE_TIMEOUT_MS <= 0 || !browser) return
+	if (idleTimer) clearTimeout(idleTimer)
+	idleTimer = setTimeout(() => shutdownBrowser(), IDLE_TIMEOUT_MS)
 }
 
 // ─── On-demand wake-up middleware ─────────────────────────────────────────────
-// Any request for the stream wakes the pipeline if it's sleeping,
-// and resets the idle countdown.
 
 app.use('/stream', async (req, res, next) => {
-	// Only count segment fetches (.ts files) as real viewer activity,
-	// not the playlist poll that Channels DVR does every few seconds.
 	if (req.path.endsWith('.ts')) {
 		resetIdleTimer()
+		if (!browser && !isStartingBrowser) {
+			console.log('[ws4channels] Viewer detected — waking browser...')
+			startBrowserAndCapture()
+		}
 	}
 
-	if (!ffmpegProc && !isStarting) {
-		console.log('[ws4channels] Viewer detected — waking pipeline...')
-		startTranscoding() // intentionally not awaited; respond after segments appear
-	}
-
-	// If pipeline is still spinning up, wait briefly before serving
 	if (!isStreamReady) {
 		let waited = 0
-		while (!isStreamReady && waited < 12000) {
-			await waitFor(300)
-			waited += 300
+		while (!isStreamReady && waited < 8000) {
+			await waitFor(200)
+			waited += 200
 		}
 	}
 
@@ -358,9 +480,10 @@ app.get('/guide.xml', (req, res) => {
 app.get('/health', (req, res) => {
 	res.status(isStreamReady ? 200 : 503).json({
 		ready: isStreamReady,
-		pipeline: !!ffmpegProc,
-		codec: VIDEO_OPTIONS,
+		mode: isBrowserReady ? 'live' : 'warmup',
+		browser: !!browser,
 		version: VERSION,
+		codec: VIDEO_OPTIONS,
 	})
 })
 
@@ -368,32 +491,31 @@ app.get('/health', (req, res) => {
 
 const { cpus, memoryMB } = getContainerLimits()
 console.log(`[ws4channels] v${VERSION} | ${cpus} CPU cores | ${memoryMB}MB RAM`)
-console.log(`[ws4channels] Video codec config: ${VIDEO_OPTIONS}`)
-if (IDLE_TIMEOUT_MS > 0) {
-	console.log(`[ws4channels] Idle shutdown enabled: ${IDLE_TIMEOUT_MS / 1000}s`)
-} else {
-	console.log(`[ws4channels] Idle shutdown disabled (always-on mode)`)
-}
+console.log(`[ws4channels] Video: ${VIDEO_OPTIONS}`)
+console.log(`[ws4channels] Idle timeout: ${IDLE_TIMEOUT_MS > 0 ? IDLE_TIMEOUT_MS / 1000 + 's' : 'disabled'}`)
 
-app.listen(STREAM_PORT, () => {
-	console.log(`[ws4channels] Server listening on :${STREAM_PORT}`)
+app.listen(STREAM_PORT, async () => {
+	console.log(`[ws4channels] Listening on :${STREAM_PORT}`)
+	createAudioInputFile()
 
-	// If idle shutdown is disabled, start immediately (original behavior).
-	// Otherwise, wait for the first viewer to trigger startup.
+	// Start the single ffmpeg pipeline — it pumps warmup frames immediately
+	await startFFmpeg().catch(err => {
+		console.error('[ws4channels] FFmpeg start failed:', err.message)
+	})
+
+	// If idle timeout is disabled, launch browser right away
 	if (IDLE_TIMEOUT_MS <= 0) {
-		startTranscoding()
+		await startBrowserAndCapture()
 	} else {
-		console.log('[ws4channels] Waiting for first viewer before starting pipeline...')
+		console.log('[ws4channels] Ready. Browser starts on first viewer; warmup image is live now.')
 	}
 })
 
 process.on('SIGINT', async () => {
-	console.log('SIGINT')
-	await stopTranscoding()
+	await stopEverything()
 	process.exit()
 })
 process.on('SIGTERM', async () => {
-	console.log('SIGTERM')
-	await stopTranscoding()
+	await stopEverything()
 	process.exit()
 })
