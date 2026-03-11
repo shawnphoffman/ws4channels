@@ -407,7 +407,7 @@ async function launchBrowser() {
 		console.warn('[ws4channels] Container element not found, capturing anyway')
 	}
 	await page.setViewport({ width: 1280, height: 720 })
-	await page.screenshot({ path: path.join(OUTPUT_DIR, 'debug.png'), fullPage: true }).catch(() => {})
+	// await page.screenshot({ path: path.join(OUTPUT_DIR, 'debug.png'), fullPage: true }).catch(() => {})
 	console.log('[ws4channels] Browser ready')
 }
 
@@ -432,7 +432,7 @@ async function startBrowserCapture() {
 				const screenshot = await page.screenshot({
 					type: 'jpeg',
 					quality: 80,
-					clip: { x: 4, y: 50, width: 840, height: 470 },
+					// clip: { x: 4, y: 50, width: 840, height: 470 },
 				})
 				if (ffmpegStream?.writable) ffmpegStream.write(screenshot)
 			} catch (err) {

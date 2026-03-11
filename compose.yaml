@@ -17,7 +17,7 @@ x-health: &health
 #     external: true
 
 # =================================================================
-name: weather-channels
+name: weather-channels-fork
 services:
   # ================================
   # weatherstar-4000
@@ -50,8 +50,8 @@ services:
       WSQS_spc-outlook-checkbox: true
       WSQS_radar-checkbox: true
       WSQS_settings-wide-checkbox: true
-      WSQS_settings-kiosk-checkbox: false
-      # WSQS_settings-kiosk-checkbox: true
+      # WSQS_settings-kiosk-checkbox: false
+      WSQS_settings-kiosk-checkbox: true
       # WSQS_settings-stickyKiosk-checkbox: false
       # WSQS_settings-customTextEnable-checkbox: false
       WSQS_settings-speed-select: 1.00
@@ -72,6 +72,22 @@ services:
       test: curl -f http://localhost:8080 || exit 1
       <<: *health
     # ================================
+    labels:
+      # TRAEFIK
+      - traefik.enable=true
+      # Use the right network and port
+      - traefik.docker.network=proxy_net
+      - traefik.http.services.weather.loadbalancer.server.port=8080
+      # HTTPS by default
+      - traefik.http.routers.weather.rule=Host(`weather.lan.goober.house`)
+      - traefik.http.routers.weather.entrypoints=websecure
+      - traefik.http.routers.weather.tls=true
+      - traefik.http.routers.weather.tls.certresolver=cloudflare
+      # HTTP redirect to HTTPS
+      - traefik.http.routers.weather-http.entrypoints=web
+      - traefik.http.routers.weather-http.rule=Host(`weather.lan.goober.house`)
+      - traefik.http.routers.weather-http.middlewares=redir-https
+      - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
 
   # ================================
   # ws4k -> channels dvr
@@ -104,3 +120,21 @@ services:
       test: curl -f http://localhost:9798/guide.xml || exit 1
       <<: *health
     # ================================
+    labels:
+      # TRAEFIK
+      - traefik.enable=true
+      # Use the right network and port
+      - traefik.docker.network=proxy_net
+      - traefik.http.services.weatherchannel.loadbalancer.server.port=9798
+      # HTTPS by default
+      - traefik.http.routers.weatherchannel.rule=Host(`weather-channel.lan.goober.house`)
+      - traefik.http.routers.weatherchannel.entrypoints=websecure
+      - traefik.http.routers.weatherchannel.tls=true
+      - traefik.http.routers.weatherchannel.tls.certresolver=cloudflare
+      - traefik.http.routers.weatherchannel.service=weatherchannel
+      # HTTP redirect to HTTPS
+      - traefik.http.routers.weatherchannel-http.entrypoints=web
+      - traefik.http.routers.weatherchannel-http.rule=Host(`weather-channel.lan.goober.house`)
+      - traefik.http.routers.weatherchannel-http.middlewares=redir-https
+      - traefik.http.routers.weatherchannel-http.service=weatherchannel
+      - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
