@@ -87,7 +87,7 @@ services:
       - traefik.http.routers.weather-http.entrypoints=web
       - traefik.http.routers.weather-http.rule=Host(`weather.lan.goober.house`)
       - traefik.http.routers.weather-http.middlewares=redir-https
-      - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
+      # - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
 
   # ================================
   # ws4k -> channels dvr
@@ -147,4 +147,4 @@ services:
       - traefik.http.routers.weatherchannel-http.rule=Host(`weather-channel.lan.goober.house`)
       - traefik.http.routers.weatherchannel-http.middlewares=redir-https
       - traefik.http.routers.weatherchannel-http.service=weatherchannel
-      - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
+      # - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
