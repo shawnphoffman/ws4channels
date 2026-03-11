@@ -117,9 +117,9 @@ services:
       # Software encoding (default, works everywhere)
       # VIDEO_OPTIONS: default
       # Intel Quick Sync
-      VIDEO_OPTIONS: qsv
+      # VIDEO_OPTIONS: qsv
       # VA-API hardware encoding
-      # VIDEO_OPTIONS: vaapi
+      VIDEO_OPTIONS: vaapi
       # Custom string (passed through as-is)
       # VIDEO_OPTIONS: "-c:v libx264 -preset medium -b:v 1000k"
     # ================================
