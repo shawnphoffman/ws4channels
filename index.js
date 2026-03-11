@@ -72,6 +72,9 @@ function getVideoConfig() {
 
 const VIDEO_CONFIG = getVideoConfig()
 
+// HLS segment duration (seconds). Must match between warmup and live for clean handoff.
+const HLS_SEGMENT_DURATION = 2
+
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
 const OUTPUT_DIR = path.join(__dirname, 'output')
@@ -169,12 +172,14 @@ function generateXMLTV(host) {
 	return xml + '\n</tv>'
 }
 
-// ─── Pre-rendered warmup HLS ─────────────────────────────────────────────────
-// At boot, generate a short static HLS segment from the warmup image with a
-// silent AAC track so clients see an audio stream from segment 0 and don't
-// lock in as video-only. Always uses software encoding (x264) for warmup.
+// ─── Pre-rendered warmup HLS (always-available) ──────────────────────────────
+// At boot, generate a loading clip from the warmup image so the channel is
+// always available: viewers see this when idle or on error, and live when the
+// browser is running (same URL, same semantics as MediaMTX always-available).
+// Format matches live (resolution, codec, segment duration) for seamless handoff.
+// Always uses software encoding (x264) for warmup so it runs without hardware.
 
-const WARMUP_FORMAT_VERSION = 2
+const WARMUP_FORMAT_VERSION = 3
 const WARMUP_VERSION_FILE = path.join(WARMUP_DIR, '.version')
 
 function ensureWarmupImage() {
@@ -209,9 +214,11 @@ function generateWarmupHLS() {
 
 	console.log('[ws4channels] Pre-rendering warmup HLS segments (with silent audio)...')
 
-	// One very short segment (~1s) with silent AAC matching live encoder so clients
-	// see an audio track from the start and hand off cleanly to live. Run async so
-	// the server can accept requests while generating.
+	// One segment matching live HLS segment duration; same resolution, codec, and
+	// audio as live so handoff is seamless. Run async so the server can accept
+	// requests while generating.
+	const warmupVf = 'scale=1280:720,format=yuv420p'
+	const warmupOutputArgs = ['-preset', 'ultrafast', '-b:v', '500k']
 	const child = spawn(
 		'ffmpeg',
 		[
@@ -227,15 +234,12 @@ function generateWarmupHLS() {
 			'-i',
 			'anullsrc=channel_layout=stereo:sample_rate=44100',
 			'-t',
-			'1',
+			String(HLS_SEGMENT_DURATION),
 			'-vf',
-			'scale=1280:720,format=yuv420p',
+			warmupVf,
 			'-c:v',
 			'libx264',
-			'-preset',
-			'ultrafast',
-			'-b:v',
-			'500k',
+			...warmupOutputArgs,
 			'-c:a',
 			'aac',
 			'-b:a',
@@ -248,7 +252,7 @@ function generateWarmupHLS() {
 			'-f',
 			'hls',
 			'-hls_time',
-			'1',
+			String(HLS_SEGMENT_DURATION),
 			'-hls_list_size',
 			'0',
 			'-hls_segment_filename',
@@ -259,7 +263,7 @@ function generateWarmupHLS() {
 	)
 	let stderr = []
 	child.stderr.on('data', chunk => stderr.push(chunk))
-	child.on('close', (code, signal) => {
+		child.on('close', (code, signal) => {
 		if (code !== 0) {
 			console.error('[ws4channels] Warmup HLS generation failed:', Buffer.concat(stderr).toString('utf8'))
 			return
@@ -269,6 +273,7 @@ function generateWarmupHLS() {
 		} catch {}
 		console.log('[ws4channels] Warmup HLS segments ready')
 		deployWarmup()
+		verifyWarmupFormat()
 	})
 }
 
@@ -286,6 +291,32 @@ function deployWarmup() {
 	isBrowserReady = false
 	isStreamReady = true
 	console.log(`[ws4channels] Warmup deployed (${warmupSegments.length} segments)`)
+}
+
+/** Optional: probe first warmup segment and log a warning if format doesn't match live expectations. */
+function verifyWarmupFormat() {
+	const warmupSegments = fs
+		.readdirSync(WARMUP_DIR)
+		.filter(f => f.endsWith('.ts'))
+		.sort()
+	if (!warmupSegments.length) return
+	const segPath = path.join(WARMUP_DIR, warmupSegments[0])
+	const probe = spawnSync('ffprobe', [
+		'-v', 'error',
+		'-select_streams', 'v:0',
+		'-show_entries', 'stream=codec_name,width,height',
+		'-of', 'json',
+		segPath,
+	], { encoding: 'utf8' })
+	if (probe.status !== 0) return
+	try {
+		const out = JSON.parse(probe.stdout)
+		const stream = out?.streams?.[0]
+		if (!stream) return
+		if (stream.codec_name !== 'h264' || stream.width !== 1280 || stream.height !== 720) {
+			console.warn('[ws4channels] Warmup format mismatch: expected H264 1280x720, got', stream.codec_name, stream.width + 'x' + stream.height)
+		}
+	} catch {}
 }
 
 // ─── Audio feeder ────────────────────────────────────────────────────────────
@@ -428,7 +459,7 @@ function switchToLiveFFmpeg() {
 				...outputArgs,
 				'-f hls',
 				'-hls_time',
-				'2',
+				String(HLS_SEGMENT_DURATION),
 				'-hls_list_size',
 				'3',
 				'-hls_flags',
@@ -664,10 +695,10 @@ app.get('/stream/stream.m3u8', (req, res) => {
 
 	res.send(`#EXTM3U
 #EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:2
+#EXT-X-TARGETDURATION:${HLS_SEGMENT_DURATION}
 #EXT-X-MEDIA-SEQUENCE:${warmupSeq}
 #EXT-X-DISCONTINUITY
-#EXTINF:1.000,
+#EXTINF:${HLS_SEGMENT_DURATION}.000,
 ${warmupSegments[0]}
 `)
 	warmupSeq++
