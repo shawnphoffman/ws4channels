@@ -19,7 +19,7 @@ const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
 const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
 
-const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '120') * 1000
+const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '300') * 1000
 
 // ─── Video encoding config ──────────────────────────────────────────────────
 // VIDEO_OPTIONS env var accepts:
@@ -169,9 +169,12 @@ function generateXMLTV(host) {
 }
 
 // ─── Pre-rendered warmup HLS ─────────────────────────────────────────────────
-// At boot, generate a short static HLS segment from the warmup image.
-// Always uses software encoding (x264) for warmup since it's a one-time cost
-// and avoids hardware encoder compatibility issues at boot.
+// At boot, generate a short static HLS segment from the warmup image with a
+// silent AAC track so clients see an audio stream from segment 0 and don't
+// lock in as video-only. Always uses software encoding (x264) for warmup.
+
+const WARMUP_FORMAT_VERSION = 2
+const WARMUP_VERSION_FILE = path.join(WARMUP_DIR, '.version')
 
 function ensureWarmupImage() {
 	if (fs.existsSync(WARMUP_IMAGE)) return
@@ -183,16 +186,30 @@ function generateWarmupHLS() {
 	ensureWarmupImage()
 
 	const warmupM3U8 = path.join(WARMUP_DIR, 'stream.m3u8')
-
-	if (fs.existsSync(warmupM3U8)) {
+	let useCache = false
+	try {
+		if (fs.existsSync(warmupM3U8) && fs.existsSync(WARMUP_VERSION_FILE)) {
+			const v = fs.readFileSync(WARMUP_VERSION_FILE, 'utf8').trim()
+			if (v === String(WARMUP_FORMAT_VERSION)) useCache = true
+		}
+	} catch {}
+	if (useCache) {
 		console.log('[ws4channels] Using cached warmup HLS segments')
 		deployWarmup()
 		return
 	}
 
-	console.log('[ws4channels] Pre-rendering warmup HLS segments...')
+	// Invalidate old cache (e.g. video-only warmup) so we regenerate with audio
+	try {
+		fs.readdirSync(WARMUP_DIR).forEach(f => {
+			fs.unlinkSync(path.join(WARMUP_DIR, f))
+		})
+	} catch {}
 
-	// Always use software encoding for warmup — simple, reliable, one-time cost
+	console.log('[ws4channels] Pre-rendering warmup HLS segments (with silent audio)...')
+
+	// One very short segment (~1s) with silent AAC matching live encoder so clients
+	// see an audio track from the start and hand off cleanly to live.
 	const result = spawnSync(
 		'ffmpeg',
 		[
@@ -203,7 +220,12 @@ function generateWarmupHLS() {
 			String(FRAME_RATE),
 			'-i',
 			WARMUP_IMAGE,
-			'-an',
+			'-f',
+			'lavfi',
+			'-i',
+			'anullsrc=channel_layout=stereo:sample_rate=44100',
+			'-t',
+			'1',
 			'-vf',
 			'scale=1280:720,format=yuv420p',
 			'-c:v',
@@ -212,12 +234,19 @@ function generateWarmupHLS() {
 			'ultrafast',
 			'-b:v',
 			'500k',
-			'-t',
+			'-c:a',
+			'aac',
+			'-b:a',
+			'128k',
+			'-ar',
+			'44100',
+			'-ac',
 			'2',
+			'-shortest',
 			'-f',
 			'hls',
 			'-hls_time',
-			'2',
+			'1',
 			'-hls_list_size',
 			'0',
 			'-hls_segment_filename',
@@ -232,6 +261,9 @@ function generateWarmupHLS() {
 		return
 	}
 
+	try {
+		fs.writeFileSync(WARMUP_VERSION_FILE, String(WARMUP_FORMAT_VERSION))
+	} catch {}
 	console.log('[ws4channels] Warmup HLS segments ready')
 	deployWarmup()
 }
@@ -262,12 +294,22 @@ const AUDIO_FIFO = path.join(OUTPUT_DIR, 'audio_fifo')
 function startAudioFeeder() {
 	stopAudioFeeder()
 
+	if (!fs.existsSync(AUDIO_LIST)) {
+		console.warn('[ws4channels] Audio list missing:', AUDIO_LIST)
+		return
+	}
+
 	try {
 		fs.unlinkSync(AUDIO_FIFO)
 	} catch {}
-	spawnSync('mkfifo', [AUDIO_FIFO])
+	const mkfifo = spawnSync('mkfifo', [AUDIO_FIFO])
+	if (mkfifo.status !== 0) {
+		console.warn('[ws4channels] Failed to create audio FIFO:', AUDIO_FIFO, mkfifo.stderr?.toString())
+		return
+	}
 
 	const { spawn } = require('child_process')
+	let stderrChunks = []
 	audioFeeder = spawn(
 		'ffmpeg',
 		[
@@ -297,15 +339,21 @@ function startAudioFeeder() {
 		{ stdio: ['pipe', 'pipe', 'pipe'] },
 	)
 
-	audioFeeder.stderr.on('data', () => {})
-	audioFeeder.on('error', err => {
-		console.warn('[ws4channels] Audio feeder error:', err.message)
+	audioFeeder.stderr.on('data', chunk => {
+		stderrChunks.push(chunk)
 	})
-	audioFeeder.on('exit', () => {
+	audioFeeder.on('error', err => {
+		console.warn('[ws4channels] Audio feeder spawn error:', err.message)
+	})
+	audioFeeder.on('exit', (code, signal) => {
+		if (code != null && code !== 0) {
+			const stderr = Buffer.concat(stderrChunks).toString('utf8').trim()
+			console.warn('[ws4channels] Audio feeder exited with code', code, signal || '', stderr ? '\n' + stderr : '')
+		}
 		audioFeeder = null
 	})
 
-	console.log('[ws4channels] Audio feeder started')
+	console.log('[ws4channels] Audio feeder started (concat list:', AUDIO_LIST, ')')
 }
 
 function stopAudioFeeder() {
