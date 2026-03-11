@@ -22,9 +22,9 @@ services:
   # ================================
   # weatherstar-4000
   # ================================
-  ws4kp:
+  ws4kp-fork:
     image: ghcr.io/netbymatt/ws4kp:latest
-    container_name: ws4kp
+    container_name: ws4kp-fork
     <<: *common
     environment:
       <<: *env
@@ -95,12 +95,12 @@ services:
   #   - */playlist.m3u
   #   - */guide.xml
   # ================================
-  ws4channels:
+  ws4channels-fork:
     build: .
-    container_name: ws4channels
+    container_name: ws4channels-fork
     <<: *common
     depends_on:
-      ws4kp:
+      ws4kp-fork:
         condition: service_healthy
     # deploy:
     #   resources:
@@ -109,7 +109,7 @@ services:
     #       cpus: 1
     environment:
       <<: *env
-      WS4KP_HOST: ws4kp
+      WS4KP_HOST: ws4kp-fork
       WS4KP_PORT: 8080
       FRAME_RATE: 5
     # ================================
