@@ -11,7 +11,7 @@ const app = express()
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const VERSION = '4.2'
+const VERSION = '4.3'
 const WS4KP_HOST = process.env.WS4KP_HOST || 'localhost'
 const WS4KP_PORT = process.env.WS4KP_PORT || '8080'
 const STREAM_PORT = process.env.STREAM_PORT || '9798'
@@ -21,12 +21,55 @@ const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
 
 const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '120') * 1000
 
-// Hardware transcoding — set VIDEO_OPTIONS env var:
-//   NVIDIA NVENC : -c:v h264_nvenc -pix_fmt yuv420p -b:v 2000k
-//   Intel QSV    : -c:v h264_qsv -b:v 1000k
-//   AMD VAAPI    : -vaapi_device /dev/dri/renderD128 -c:v h264_vaapi -b:v 1000k -vf format=nv12,hwupload
-//   Software     : (default) -c:v libx264 -preset ultrafast -b:v 500k
-const VIDEO_OPTIONS = process.env.VIDEO_OPTIONS || '-c:v libx264 -preset ultrafast -b:v 500k'
+// ─── Video encoding config ──────────────────────────────────────────────────
+// VIDEO_OPTIONS env var accepts:
+//   "default"  → Software x264 (works everywhere)
+//   "qsv"      → Intel Quick Sync Video (requires /dev/dri passthrough)
+//   "vaapi"    → VA-API hardware encoding (requires /dev/dri passthrough)
+//   Custom string → Passed through as-is, e.g. "-c:v libx264 -preset ultrafast -b:v 500k"
+const VIDEO_OPTIONS_RAW = process.env.VIDEO_OPTIONS || 'default'
+
+const VIDEO_PRESETS = {
+	default: {
+		codec: 'libx264',
+		outputArgs: ['-preset', 'ultrafast', '-b:v', '500k'],
+		inputArgs: [],
+		vf: 'scale=1280:720,format=yuv420p',
+	},
+	qsv: {
+		codec: 'h264_qsv',
+		outputArgs: ['-b:v', '500k', '-global_quality', '25'],
+		inputArgs: ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw'],
+		vf: 'scale=1280:720,format=nv12,hwupload=extra_hw_frames=64',
+	},
+	vaapi: {
+		codec: 'h264_vaapi',
+		outputArgs: ['-b:v', '500k'],
+		inputArgs: ['-vaapi_device', '/dev/dri/renderD128'],
+		vf: 'scale=1280:720,format=nv12,hwupload',
+	},
+}
+
+function getVideoConfig() {
+	const key = VIDEO_OPTIONS_RAW.toLowerCase().trim()
+	if (VIDEO_PRESETS[key]) {
+		return { ...VIDEO_PRESETS[key], preset: key }
+	}
+	// Custom string — parse codec and extra args
+	const opts = VIDEO_OPTIONS_RAW.trim().split(/\s+/)
+	const codecIndex = opts.indexOf('-c:v')
+	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
+	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
+	return {
+		codec,
+		outputArgs: extra,
+		inputArgs: [],
+		vf: 'scale=1280:720,format=yuv420p',
+		preset: 'custom',
+	}
+}
+
+const VIDEO_CONFIG = getVideoConfig()
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -34,7 +77,6 @@ const OUTPUT_DIR = path.join(__dirname, 'output')
 const AUDIO_DIR = path.join(__dirname, 'music')
 const LOGO_DIR = path.join(__dirname, 'logo')
 const HLS_FILE = path.join(OUTPUT_DIR, 'stream.m3u8')
-// const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.jpg')
 const WARMUP_IMAGE = path.join(LOGO_DIR, 'warmup.png')
 const WARMUP_DIR = path.join(__dirname, 'warmup_hls')
 const AUDIO_LIST = path.join(__dirname, 'audio_list.txt')
@@ -49,7 +91,7 @@ app.use('/logo', express.static(LOGO_DIR))
 
 let ffmpegProc = null
 let ffmpegStream = null
-let audioFeeder = null // child ffmpeg process that pipes audio to FIFO
+let audioFeeder = null
 let browser = null
 let page = null
 let captureInterval = null
@@ -102,14 +144,6 @@ function createAudioInputFile() {
 	console.log(`[ws4channels] Loaded ${files.length} music files`)
 }
 
-function parseVideoOptions() {
-	const opts = VIDEO_OPTIONS.trim().split(/\s+/)
-	const codecIndex = opts.indexOf('-c:v')
-	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
-	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
-	return { codec, extra }
-}
-
 function generateXMLTV(host) {
 	const now = new Date()
 	const baseUrl = `http://${host}`
@@ -135,13 +169,13 @@ function generateXMLTV(host) {
 }
 
 // ─── Pre-rendered warmup HLS ─────────────────────────────────────────────────
-// At boot, generate a few static HLS segments from the warmup image.
-// These are served directly as static files — no ffmpeg process running.
-// When the browser is ready, live ffmpeg overwrites the playlist.
+// At boot, generate a short static HLS segment from the warmup image.
+// Always uses software encoding (x264) for warmup since it's a one-time cost
+// and avoids hardware encoder compatibility issues at boot.
 
 function ensureWarmupImage() {
 	if (fs.existsSync(WARMUP_IMAGE)) return
-	console.log('[ws4channels] No warmup.jpg found — generating a placeholder image')
+	console.log('[ws4channels] No warmup image found — generating a placeholder')
 	spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
 }
 
@@ -150,7 +184,6 @@ function generateWarmupHLS() {
 
 	const warmupM3U8 = path.join(WARMUP_DIR, 'stream.m3u8')
 
-	// Only regenerate if not already cached
 	if (fs.existsSync(warmupM3U8)) {
 		console.log('[ws4channels] Using cached warmup HLS segments')
 		deployWarmup()
@@ -158,9 +191,8 @@ function generateWarmupHLS() {
 	}
 
 	console.log('[ws4channels] Pre-rendering warmup HLS segments...')
-	const { codec, extra } = parseVideoOptions()
 
-	// Generate 2 seconds (1 segment) of static warmup video
+	// Always use software encoding for warmup — simple, reliable, one-time cost
 	const result = spawnSync(
 		'ffmpeg',
 		[
@@ -175,8 +207,11 @@ function generateWarmupHLS() {
 			'-vf',
 			'scale=1280:720,format=yuv420p',
 			'-c:v',
-			codec,
-			...extra,
+			'libx264',
+			'-preset',
+			'ultrafast',
+			'-b:v',
+			'500k',
 			'-t',
 			'2',
 			'-f',
@@ -208,7 +243,6 @@ function deployWarmup() {
 		.sort()
 	if (!warmupSegments.length) return
 
-	// Copy segment files to output dir so static file serving can find them
 	for (const seg of warmupSegments) {
 		fs.copyFileSync(path.join(WARMUP_DIR, seg), path.join(OUTPUT_DIR, seg))
 	}
@@ -222,14 +256,12 @@ function deployWarmup() {
 // Spawns a separate ffmpeg that reads mp3s at realtime (-re) and outputs raw
 // PCM audio to a named FIFO pipe. The main ffmpeg reads from this FIFO as a
 // file input, but since it's a pipe, it can only read at the rate data arrives.
-// This prevents the audio read-ahead that caused the desync/buffering issues.
 
 const AUDIO_FIFO = path.join(OUTPUT_DIR, 'audio_fifo')
 
 function startAudioFeeder() {
 	stopAudioFeeder()
 
-	// Create named FIFO if it doesn't exist
 	try {
 		fs.unlinkSync(AUDIO_FIFO)
 	} catch {}
@@ -265,7 +297,7 @@ function startAudioFeeder() {
 		{ stdio: ['pipe', 'pipe', 'pipe'] },
 	)
 
-	audioFeeder.stderr.on('data', () => {}) // suppress stderr
+	audioFeeder.stderr.on('data', () => {})
 	audioFeeder.on('error', err => {
 		console.warn('[ws4channels] Audio feeder error:', err.message)
 	})
@@ -289,15 +321,13 @@ function stopAudioFeeder() {
 }
 
 // ─── FFmpeg: live mode ────────────────────────────────────────────────────────
-// Starts ffmpeg reading JPEG screenshots from stdin pipe + PCM audio from a
-// named FIFO. The video pipe is stdin, the audio is a FIFO that behaves like
-// a pipe (blocks until data is available). No read-ahead on either input.
+// Starts ffmpeg reading JPEG screenshots from stdin pipe + PCM audio from FIFO.
+// Uses the configured video encoder (software, QSV, or VAAPI).
 
 function switchToLiveFFmpeg() {
 	return new Promise((resolve, reject) => {
 		console.log('[ws4channels] Starting live ffmpeg...')
 
-		// Kill any existing live ffmpeg (e.g. from a previous session)
 		if (ffmpegProc) {
 			try {
 				ffmpegProc.kill('SIGINT')
@@ -305,13 +335,19 @@ function switchToLiveFFmpeg() {
 			ffmpegProc = null
 		}
 
-		// Start audio feeder — writes PCM to the FIFO
 		startAudioFeeder()
 
 		ffmpegStream = new PassThrough()
-		const { codec, extra } = parseVideoOptions()
+		const { codec, outputArgs, inputArgs, vf } = VIDEO_CONFIG
 
-		ffmpegProc = ffmpeg()
+		const proc = ffmpeg()
+
+		// Add hardware device init args before inputs (needed for QSV/VAAPI)
+		if (inputArgs.length) {
+			proc.outputOptions(inputArgs)
+		}
+
+		proc
 			.input(ffmpegStream)
 			.inputFormat('image2pipe')
 			.inputOptions(['-c:v mjpeg', `-framerate ${FRAME_RATE}`])
@@ -319,7 +355,7 @@ function switchToLiveFFmpeg() {
 			.inputOptions(['-f s16le', '-ar 44100', '-ac 2'])
 			.outputOptions([
 				'-vf',
-				'scale=1280:720,format=yuv420p',
+				vf,
 				'-c:a aac',
 				'-b:a 128k',
 				'-async',
@@ -333,7 +369,7 @@ function switchToLiveFFmpeg() {
 				`expr:gte(t,n_forced*2)`,
 				'-flush_packets',
 				'1',
-				...extra,
+				...outputArgs,
 				'-f hls',
 				'-hls_time',
 				'2',
@@ -346,8 +382,9 @@ function switchToLiveFFmpeg() {
 			])
 			.videoCodec(codec)
 			.output(HLS_FILE)
-			.on('start', () => {
+			.on('start', cmd => {
 				console.log('[ws4channels] Live ffmpeg started (with audio)')
+				console.log('[ws4channels] FFmpeg cmd:', cmd)
 				isBrowserReady = true
 				restartDelay = 1000
 				resolve()
@@ -361,7 +398,6 @@ function switchToLiveFFmpeg() {
 					ffmpegStream.destroy()
 					ffmpegStream = null
 				}
-				// Fall back to static warmup
 				console.log(`[ws4channels] Falling back to warmup, retrying in ${restartDelay / 1000}s`)
 				deployWarmup()
 				await waitFor(restartDelay)
@@ -375,7 +411,8 @@ function switchToLiveFFmpeg() {
 				isBrowserReady = false
 			})
 
-		ffmpegProc.run()
+		ffmpegProc = proc
+		proc.run()
 	})
 }
 
@@ -407,7 +444,6 @@ async function launchBrowser() {
 		console.warn('[ws4channels] Container element not found, capturing anyway')
 	}
 	await page.setViewport({ width: 1280, height: 720 })
-	// await page.screenshot({ path: path.join(OUTPUT_DIR, 'debug.png'), fullPage: true }).catch(() => {})
 	console.log('[ws4channels] Browser ready')
 }
 
@@ -424,7 +460,6 @@ async function startBrowserCapture() {
 			if (!ffmpegProc || !ffmpegStream || !page) return
 			try {
 				if (page.isClosed()) {
-					// Only relaunch if we're still supposed to be capturing
 					if (!isBrowserReady) return
 					await launchBrowser()
 					return
@@ -432,11 +467,9 @@ async function startBrowserCapture() {
 				const screenshot = await page.screenshot({
 					type: 'jpeg',
 					quality: 80,
-					// clip: { x: 4, y: 50, width: 840, height: 470 },
 				})
 				if (ffmpegStream?.writable) ffmpegStream.write(screenshot)
 			} catch (err) {
-				// Don't relaunch if we're shutting down
 				if (!isBrowserReady) return
 				console.warn('[ws4channels] Capture error:', err.message)
 				await launchBrowser().catch(() => {})
@@ -481,7 +514,6 @@ async function shutdownBrowser() {
 		await waitFor(500)
 	}
 
-	// Restore static warmup files
 	deployWarmup()
 }
 
@@ -530,7 +562,6 @@ function resetIdleTimer() {
 // ─── On-demand wake-up middleware ─────────────────────────────────────────────
 
 app.use('/stream', async (req, res, next) => {
-	// Wake browser on any stream request
 	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
 		if (!browser && !isStartingBrowser) {
@@ -550,24 +581,19 @@ app.use('/stream', async (req, res, next) => {
 	next()
 })
 
-// Warmup sequence counter — increments each poll so the player sees "new" content
+// Warmup sequence counter
 let warmupSeq = 0
 
-// Serve the m3u8 dynamically
 app.get('/stream/stream.m3u8', (req, res) => {
 	res.set('Content-Type', 'application/vnd.apple.mpegurl')
 	res.set('Cache-Control', 'no-cache, no-store')
 
-	// If live ffmpeg has written a playlist, serve it directly
 	const filePath = path.join(OUTPUT_DIR, 'stream.m3u8')
 	if (isBrowserReady && fs.existsSync(filePath)) {
 		res.send(fs.readFileSync(filePath, 'utf8'))
 		return
 	}
 
-	// Warmup — serve the same .ts segment with an incrementing sequence number.
-	// The player sees a new sequence each poll, re-fetches the segment, and keeps
-	// showing the warmup image. Without this, the player stalls on a static playlist.
 	const warmupSegments = fs
 		.readdirSync(WARMUP_DIR)
 		.filter(f => f.endsWith('.ts'))
@@ -577,8 +603,6 @@ app.get('/stream/stream.m3u8', (req, res) => {
 		return
 	}
 
-	// Add EXT-X-DISCONTINUITY before the segment so the player doesn't
-	// try to match timestamps between "old" and "new" segments (they're the same file)
 	res.send(`#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:3
@@ -618,7 +642,7 @@ app.get('/health', (req, res) => {
 		mode: isBrowserReady ? 'live' : 'warmup',
 		browser: !!browser,
 		version: VERSION,
-		codec: VIDEO_OPTIONS,
+		encoder: `${VIDEO_CONFIG.preset} (${VIDEO_CONFIG.codec})`,
 	})
 })
 
@@ -626,14 +650,13 @@ app.get('/health', (req, res) => {
 
 const { cpus, memoryMB } = getContainerLimits()
 console.log(`[ws4channels] v${VERSION} | ${cpus} CPU cores | ${memoryMB}MB RAM`)
-console.log(`[ws4channels] Video: ${VIDEO_OPTIONS}`)
+console.log(`[ws4channels] Encoder: ${VIDEO_CONFIG.preset} (${VIDEO_CONFIG.codec})`)
 console.log(`[ws4channels] Idle timeout: ${IDLE_TIMEOUT_MS > 0 ? IDLE_TIMEOUT_MS / 1000 + 's' : 'disabled'}`)
 
 app.listen(STREAM_PORT, async () => {
 	console.log(`[ws4channels] Listening on :${STREAM_PORT}`)
 	createAudioInputFile()
 
-	// Pre-render warmup HLS once (cached across restarts), deploy to output
 	generateWarmupHLS()
 
 	if (IDLE_TIMEOUT_MS <= 0) {

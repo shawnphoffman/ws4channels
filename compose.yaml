@@ -114,6 +114,14 @@ services:
       WS4KP_HOST: ws4kp-fork
       WS4KP_PORT: 8080
       FRAME_RATE: 5
+      # Software encoding (default, works everywhere)
+      # VIDEO_OPTIONS: default
+      # Intel Quick Sync
+      VIDEO_OPTIONS: qsv
+      # VA-API hardware encoding
+      # VIDEO_OPTIONS: vaapi
+      # Custom string (passed through as-is)
+      # VIDEO_OPTIONS: "-c:v libx264 -preset medium -b:v 1000k"
     # ================================
     ports:
       - ${STREAM_PORT:-9798}:9798
