@@ -379,6 +379,8 @@ function switchToLiveFFmpeg() {
 				'delete_segments+discont_start',
 				'-hls_init_time',
 				'1',
+				'-start_number',
+				String(warmupSeq),
 			])
 			.videoCodec(codec)
 			.output(HLS_FILE)
