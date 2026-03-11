@@ -102,6 +102,8 @@ services:
     depends_on:
       ws4kp-fork:
         condition: service_healthy
+    devices:
+      - /dev/dri:/dev/dri
     # deploy:
     #   resources:
     #     limits:
