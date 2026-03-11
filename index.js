@@ -4,7 +4,7 @@ const ffmpeg = require('fluent-ffmpeg')
 const path = require('path')
 const fs = require('fs')
 const { PassThrough } = require('stream')
-const { spawnSync } = require('child_process')
+const { spawnSync, spawn } = require('child_process')
 const os = require('os')
 
 const app = express()
@@ -19,7 +19,8 @@ const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
 const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
 
-const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '300') * 1000
+let IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '300', 10) * 1000
+if (Number.isNaN(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0) IDLE_TIMEOUT_MS = 0
 
 // ─── Video encoding config ──────────────────────────────────────────────────
 // VIDEO_OPTIONS env var accepts:
@@ -209,8 +210,9 @@ function generateWarmupHLS() {
 	console.log('[ws4channels] Pre-rendering warmup HLS segments (with silent audio)...')
 
 	// One very short segment (~1s) with silent AAC matching live encoder so clients
-	// see an audio track from the start and hand off cleanly to live.
-	const result = spawnSync(
+	// see an audio track from the start and hand off cleanly to live. Run async so
+	// the server can accept requests while generating.
+	const child = spawn(
 		'ffmpeg',
 		[
 			'-y',
@@ -253,19 +255,21 @@ function generateWarmupHLS() {
 			path.join(WARMUP_DIR, 'warmup%d.ts'),
 			warmupM3U8,
 		],
-		{ timeout: 30000 },
+		{ stdio: ['ignore', 'pipe', 'pipe'] },
 	)
-
-	if (result.status !== 0) {
-		console.error('[ws4channels] Warmup HLS generation failed:', result.stderr?.toString())
-		return
-	}
-
-	try {
-		fs.writeFileSync(WARMUP_VERSION_FILE, String(WARMUP_FORMAT_VERSION))
-	} catch {}
-	console.log('[ws4channels] Warmup HLS segments ready')
-	deployWarmup()
+	let stderr = []
+	child.stderr.on('data', chunk => stderr.push(chunk))
+	child.on('close', (code, signal) => {
+		if (code !== 0) {
+			console.error('[ws4channels] Warmup HLS generation failed:', Buffer.concat(stderr).toString('utf8'))
+			return
+		}
+		try {
+			fs.writeFileSync(WARMUP_VERSION_FILE, String(WARMUP_FORMAT_VERSION))
+		} catch {}
+		console.log('[ws4channels] Warmup HLS segments ready')
+		deployWarmup()
+	})
 }
 
 function deployWarmup() {
@@ -291,12 +295,13 @@ function deployWarmup() {
 
 const AUDIO_FIFO = path.join(OUTPUT_DIR, 'audio_fifo')
 
+/** @returns {boolean} true if feeder started (FIFO + ffmpeg), false to use silent source in live pipeline */
 function startAudioFeeder() {
 	stopAudioFeeder()
 
 	if (!fs.existsSync(AUDIO_LIST)) {
-		console.warn('[ws4channels] Audio list missing:', AUDIO_LIST)
-		return
+		console.warn('[ws4channels] Audio list missing:', AUDIO_LIST, '— live stream will use silent audio')
+		return false
 	}
 
 	try {
@@ -304,11 +309,10 @@ function startAudioFeeder() {
 	} catch {}
 	const mkfifo = spawnSync('mkfifo', [AUDIO_FIFO])
 	if (mkfifo.status !== 0) {
-		console.warn('[ws4channels] Failed to create audio FIFO:', AUDIO_FIFO, mkfifo.stderr?.toString())
-		return
+		console.warn('[ws4channels] Failed to create audio FIFO:', AUDIO_FIFO, mkfifo.stderr?.toString(), '— live stream will use silent audio')
+		return false
 	}
 
-	const { spawn } = require('child_process')
 	let stderrChunks = []
 	audioFeeder = spawn(
 		'ffmpeg',
@@ -383,7 +387,7 @@ function switchToLiveFFmpeg() {
 			ffmpegProc = null
 		}
 
-		startAudioFeeder()
+		const audioFeederStarted = startAudioFeeder()
 
 		ffmpegStream = new PassThrough()
 		const { codec, outputArgs, inputArgs, vf } = VIDEO_CONFIG
@@ -399,8 +403,12 @@ function switchToLiveFFmpeg() {
 			.input(ffmpegStream)
 			.inputFormat('image2pipe')
 			.inputOptions(['-c:v mjpeg', `-framerate ${FRAME_RATE}`])
-			.input(AUDIO_FIFO)
-			.inputOptions(['-f s16le', '-ar 44100', '-ac 2'])
+		if (audioFeederStarted) {
+			proc.input(AUDIO_FIFO).inputOptions(['-f s16le', '-ar 44100', '-ac 2'])
+		} else {
+			proc.input('anullsrc=channel_layout=stereo:sample_rate=44100').inputOptions(['-f', 'lavfi'])
+		}
+		proc
 			.outputOptions([
 				'-vf',
 				vf,
@@ -433,7 +441,7 @@ function switchToLiveFFmpeg() {
 			.videoCodec(codec)
 			.output(HLS_FILE)
 			.on('start', cmd => {
-				console.log('[ws4channels] Live ffmpeg started (with audio)')
+				console.log('[ws4channels] Live ffmpeg started (' + (audioFeederStarted ? 'with music' : 'silent audio — feeder unavailable') + ')')
 				console.log('[ws4channels] FFmpeg cmd:', cmd)
 				isBrowserReady = true
 				restartDelay = 1000
@@ -598,6 +606,7 @@ async function stopEverything() {
 			.filter(f => f.endsWith('.ts') || f.endsWith('.m3u8'))
 			.forEach(f => fs.unlinkSync(path.join(OUTPUT_DIR, f)))
 	} catch {}
+	deployWarmup()
 	console.log('[ws4channels] Fully stopped.')
 }
 
@@ -655,10 +664,10 @@ app.get('/stream/stream.m3u8', (req, res) => {
 
 	res.send(`#EXTM3U
 #EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:3
+#EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:${warmupSeq}
 #EXT-X-DISCONTINUITY
-#EXTINF:2.000,
+#EXTINF:1.000,
 ${warmupSegments[0]}
 `)
 	warmupSeq++
