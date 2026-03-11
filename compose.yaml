@@ -2,8 +2,8 @@ x-common: &common
   restart: unless-stopped
   environment: &env
     TZ: America/Los_Angeles
-  # networks:
-  #   - proxy_net
+  networks:
+    - proxy_net
 
 x-health: &health
   interval: 5m
@@ -12,9 +12,9 @@ x-health: &health
   start_period: 1m
 
 # =================================================================
-# networks:
-#   proxy_net:
-#     external: true
+networks:
+  proxy_net:
+    external: true
 
 # =================================================================
 name: weather-channels-fork
