@@ -104,6 +104,8 @@ services:
         condition: service_healthy
     devices:
       - /dev/dri:/dev/dri
+    cap_add:
+      - SYS_PTRACE
     # deploy:
     #   resources:
     #     limits:
