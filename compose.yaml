@@ -57,13 +57,13 @@ services:
       WSQS_settings-speed-select: "${WSQS_settings_speed_select:-1.00}"
       WSQS_settings-scanLineMode-select: "${WSQS_settings_scanLineMode_select:-auto}"
       WSQS_settings-units-select: "${WSQS_settings_units_select:-us}"
-      WSQS_settings-customText-string: "${WSQS_settings_customText_string}"
-      WSQS_share-link-url: "${WSQS_share_link_url}"
+      WSQS_settings-customText-string: "${WSQS_settings_customText_string:-}"
+      WSQS_share-link-url: "${WSQS_share_link_url:-}"
       WSQS_settings-scanLines-checkbox: "${WSQS_settings_scanLines_checkbox:-false}"
       WSQS_settings-mediaVolume-select: "${WSQS_settings_mediaVolume_select:-0.75}"
-      WSQS_txtLocation: "${WSQS_txtLocation}"
-      WSQS_latLonQuery: "${WSQS_latLonQuery}"
-      WSQS_latLon: "${WSQS_latLon}"
+      WSQS_txtLocation: "${WSQS_txtLocation:-}"
+      WSQS_latLonQuery: "${WSQS_latLonQuery:-}"
+      WSQS_latLon: "${WSQS_latLon:-}"
     # ================================
     ports:
       - ${PORT:-8080}:8080 # change the first 8080 to meet your local network needs
@@ -125,13 +125,13 @@ services:
       # Custom string (passed through as-is)
       # VIDEO_OPTIONS: "-c:v libx264 -preset medium -b:v 1000k"
       # ── Channel & EPG metadata ──
-      CHANNEL_ID: "${CHANNEL_ID}"
-      CHANNEL_NAME: "${CHANNEL_NAME}"
-      CHANNEL_NUMBER: "${CHANNEL_NUMBER}"
-      CHANNEL_LOGO: "${CHANNEL_LOGO}"
-      PROGRAM_TITLE: "${PROGRAM_TITLE}"
-      PROGRAM_DESC: "${PROGRAM_DESC}"
-      PROGRAM_LOGO: "${PROGRAM_LOGO}"
+      CHANNEL_ID: "${CHANNEL_ID:-weatherStar4000}"
+      CHANNEL_NAME: "${CHANNEL_NAME:-WeatherStar 4000}"
+      CHANNEL_NUMBER: "${CHANNEL_NUMBER:-900}"
+      CHANNEL_LOGO: "${CHANNEL_LOGO:-ws4000.png}"
+      PROGRAM_TITLE: "${PROGRAM_TITLE:-Local Weather}"
+      PROGRAM_DESC: "${PROGRAM_DESC:-Enjoy your local weather with a touch of nostalgia.}"
+      PROGRAM_LOGO: "${PROGRAM_LOGO:-ws4000.png}"
     # ================================
     ports:
       - ${STREAM_PORT:-9798}:9798
