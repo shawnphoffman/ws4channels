@@ -20,6 +20,14 @@ const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
 const ZIP_CODE = process.env.ZIP_CODE || ''
 
+// ─── Channel & EPG metadata ─────────────────────────────────────────────────
+const CHANNEL_ID = process.env.CHANNEL_ID || 'weatherStar4000'
+const CHANNEL_NAME = process.env.CHANNEL_NAME || 'WeatherStar 4000'
+const CHANNEL_LOGO = process.env.CHANNEL_LOGO || 'ws4000.png'
+const PROGRAM_TITLE = process.env.PROGRAM_TITLE || 'Local Weather'
+const PROGRAM_DESC = process.env.PROGRAM_DESC || 'Enjoy your local weather with a touch of nostalgia.'
+const PROGRAM_LOGO = process.env.PROGRAM_LOGO || CHANNEL_LOGO
+
 let IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '300', 10) * 1000
 if (Number.isNaN(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0) IDLE_TIMEOUT_MS = 0
 
@@ -143,25 +151,38 @@ function createAudioInputFile() {
 	console.log(`[ws4channels] Loaded ${files.length} music files`)
 }
 
+function resolveLogoUrl(baseUrl, logo) {
+	if (logo.startsWith('http://') || logo.startsWith('https://')) return logo
+	return `${baseUrl}/logo/${logo}`
+}
+
 function generateXMLTV(host) {
 	const now = new Date()
 	const baseUrl = `http://${host}`
+	const channelLogoUrl = resolveLogoUrl(baseUrl, CHANNEL_LOGO)
+	const programLogoUrl = resolveLogoUrl(baseUrl, PROGRAM_LOGO)
+
+	// Floor to current hour so programs always start/end on the hour
+	const hourStart = new Date(now)
+	hourStart.setMinutes(0, 0, 0)
+
+	const fmt = d => d.toISOString().replace(/[-:T]/g, '').split('.')[0] + ' +0000'
+
 	let xml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE tv SYSTEM "xmltv.dtd">
 <tv>
-<channel id="WS4000">
-  <display-name>WeatherStar 4000</display-name>
-  <icon src="${baseUrl}/logo/ws4000.png" />
+<channel id="${CHANNEL_ID}">
+  <display-name>${CHANNEL_NAME}</display-name>
+  <icon src="${channelLogoUrl}" />
 </channel>`
 	for (let i = 0; i < 24; i++) {
-		const start = new Date(now.getTime() + i * 3600 * 1000)
+		const start = new Date(hourStart.getTime() + i * 3600 * 1000)
 		const stop = new Date(start.getTime() + 3600 * 1000)
-		const fmt = d => d.toISOString().replace(/[-:T]/g, '').split('.')[0] + ' +0000'
 		xml += `
-<programme start="${fmt(start)}" stop="${fmt(stop)}" channel="WS4000">
-  <title lang="en">Local Weather</title>
-  <desc lang="en">Enjoy your local weather with a touch of nostalgia.</desc>
-  <icon src="${baseUrl}/logo/ws4000.png" />
+<programme start="${fmt(start)}" stop="${fmt(stop)}" channel="${CHANNEL_ID}">
+  <title lang="en">${PROGRAM_TITLE}</title>
+  <desc lang="en">${PROGRAM_DESC}</desc>
+  <icon src="${programLogoUrl}" />
 </programme>`
 	}
 	return xml + '\n</tv>'
@@ -594,9 +615,11 @@ app.use('/stream', express.static(OUTPUT_DIR))
 app.get('/playlist.m3u', (req, res) => {
 	const host = req.headers.host || `localhost:${STREAM_PORT}`
 	const baseUrl = `http://${host}`
+	const channelLogoUrl = resolveLogoUrl(baseUrl, CHANNEL_LOGO)
+	const programLogoUrl = resolveLogoUrl(baseUrl, PROGRAM_LOGO)
 	res.set('Content-Type', 'application/x-mpegURL')
 	res.send(`#EXTM3U
-#EXTINF:-1 channel-id="weatherStar4000" tvg-id="weatherStar4000" tvg-channel-no="${CHANNEL_NUM}" tvc-guide-placeholders="3600" tvc-guide-title="Local Weather" tvc-guide-description="Enjoy your local weather with a touch of nostalgia." tvc-guide-art="${baseUrl}/logo/ws4000.png" tvg-logo="${baseUrl}/logo/ws4000.png",WeatherStar 4000
+#EXTINF:-1 channel-id="${CHANNEL_ID}" tvg-id="${CHANNEL_ID}" tvg-channel-no="${CHANNEL_NUM}" tvc-guide-placeholders="3600" tvc-guide-title="${PROGRAM_TITLE}" tvc-guide-description="${PROGRAM_DESC}" tvc-guide-art="${programLogoUrl}" tvg-logo="${channelLogoUrl}",${CHANNEL_NAME}
 ${baseUrl}/stream/stream.m3u8
 `)
 })
