@@ -17,7 +17,7 @@ const WS4KP_PORT = process.env.WS4KP_PORT || '8080'
 const STREAM_PORT = process.env.STREAM_PORT || '9798'
 const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
 const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
-const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '275'
+const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '900'
 const ZIP_CODE = process.env.ZIP_CODE || ''
 
 // ─── Channel & EPG metadata ─────────────────────────────────────────────────

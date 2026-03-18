@@ -125,14 +125,12 @@ services:
       # Custom string (passed through as-is)
       # VIDEO_OPTIONS: "-c:v libx264 -preset medium -b:v 1000k"
       # ── Channel & EPG metadata ──
-      CHANNEL_ID: "${CHANNEL_ID:-weatherStar4000}"
-      CHANNEL_NAME: "${CHANNEL_NAME:-WeatherStar 4000}"
-      CHANNEL_NUMBER: "${CHANNEL_NUMBER:-900}"
-      CHANNEL_LOGO: "${CHANNEL_LOGO:-ws4000.png}"
-      # PROGRAM_TITLE: "${PROGRAM_TITLE:-Local Weather}"
+      CHANNEL_ID: "${CHANNEL_ID}"
+      CHANNEL_NAME: "${CHANNEL_NAME}"
+      CHANNEL_NUMBER: "${CHANNEL_NUMBER}"
+      CHANNEL_LOGO: "${CHANNEL_LOGO}"
       PROGRAM_TITLE: "${PROGRAM_TITLE}"
-      PROGRAM_DESC: "${PROGRAM_DESC:-Enjoy your local weather with a touch of nostalgia.}"
-      # PROGRAM_LOGO: "${PROGRAM_LOGO:-ws4000.png}"
+      PROGRAM_DESC: "${PROGRAM_DESC}"
       PROGRAM_LOGO: "${PROGRAM_LOGO}"
     # ================================
     ports:
