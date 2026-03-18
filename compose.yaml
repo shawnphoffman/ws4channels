@@ -38,33 +38,32 @@ services:
       # WSQS_current_weather_checkbox: true
       # WSQS_kiosk: true
       # ====
-      WSQS_hazards-checkbox: true
-      WSQS_current-weather-checkbox: true
-      WSQS_latest-observations-checkbox: true
-      WSQS_hourly-checkbox: true
-      WSQS_hourly-graph-checkbox: true
-      WSQS_travel-checkbox: true
-      WSQS_regional-forecast-checkbox: true
-      WSQS_local-forecast-checkbox: true
-      WSQS_extended-forecast-checkbox: true
-      WSQS_almanac-checkbox: true
-      WSQS_spc-outlook-checkbox: true
-      WSQS_radar-checkbox: true
-      WSQS_settings-wide-checkbox: true
-      # WSQS_settings-kiosk-checkbox: false
-      WSQS_settings-kiosk-checkbox: true
-      # WSQS_settings-stickyKiosk-checkbox: false
-      # WSQS_settings-customTextEnable-checkbox: false
-      WSQS_settings-speed-select: 1.00
-      # WSQS_settings-scanLineMode-select: auto
-      WSQS_settings-units-select: us
-      # WSQS_settings-customText-string:
-      # WSQS_share-link-url:
-      # WSQS_settings-scanLines-checkbox: false
-      # WSQS_settings-mediaVolume-select: 0.75
-      # WSQS_txtLocation:
-      # WSQS_latLonQuery:
-      # WSQS_latLon:
+      WSQS_hazards-checkbox: ${WSQS_hazards-checkbox:-true}
+      WSQS_current-weather-checkbox: ${WSQS_current-weather-checkbox:-true}
+      WSQS_latest-observations-checkbox: ${WSQS_latest-observations-checkbox:-true}
+      WSQS_hourly-checkbox: ${WSQS_hourly-checkbox:-true}
+      WSQS_hourly-graph-checkbox: ${WSQS_hourly-graph-checkbox:-true}
+      WSQS_travel-checkbox: ${WSQS_travel-checkbox:-true}
+      WSQS_regional-forecast-checkbox: ${WSQS_regional-forecast-checkbox:-true}
+      WSQS_local-forecast-checkbox: ${WSQS_local-forecast-checkbox:-true}
+      WSQS_extended-forecast-checkbox: ${WSQS_extended-forecast-checkbox:-true}
+      WSQS_almanac-checkbox: ${WSQS_almanac-checkbox:-true}
+      WSQS_spc-outlook-checkbox: ${WSQS_spc-outlook-checkbox:-true}
+      WSQS_radar-checkbox: ${WSQS_radar-checkbox:-true}
+      WSQS_settings-wide-checkbox: ${WSQS_settings-wide-checkbox:-true}
+      WSQS_settings-kiosk-checkbox: ${WSQS_settings-kiosk-checkbox:-false}
+      WSQS_settings-stickyKiosk-checkbox: ${WSQS_settings-stickyKiosk-checkbox:-false}
+      WSQS_settings-customTextEnable-checkbox: ${WSQS_settings-customTextEnable-checkbox:-false}
+      WSQS_settings-speed-select: ${WSQS_settings-speed-select:-1.00}
+      WSQS_settings-scanLineMode-select: ${WSQS_settings-scanLineMode-select:-auto}
+      WSQS_settings-units-select: ${WSQS_settings-units-select:-us}
+      WSQS_settings-customText-string: ${WSQS_settings-customText-string}
+      WSQS_share-link-url: ${WSQS_share-link-url}
+      WSQS_settings-scanLines-checkbox: ${WSQS_settings-scanLines-checkbox:-false}
+      WSQS_settings-mediaVolume-select: ${WSQS_settings-mediaVolume-select:-0.75}
+      WSQS_txtLocation: ${WSQS_txtLocation}
+      WSQS_latLonQuery: ${WSQS_latLonQuery}
+      WSQS_latLon: ${WSQS_latLon}
     # ================================
     ports:
       - ${PORT:-8080}:8080 # change the first 8080 to meet your local network needs
@@ -126,13 +125,15 @@ services:
       # Custom string (passed through as-is)
       # VIDEO_OPTIONS: "-c:v libx264 -preset medium -b:v 1000k"
       # ── Channel & EPG metadata ──
-      # CHANNEL_ID: weatherStar4000
-      # CHANNEL_NAME: WeatherStar 4000
-      # CHANNEL_NUMBER: 275
-      # CHANNEL_LOGO: ws4000.png
-      # PROGRAM_TITLE: Local Weather
-      # PROGRAM_DESC: "Enjoy your local weather with a touch of nostalgia."
-      # PROGRAM_LOGO: ws4000.png
+      CHANNEL_ID: ${CHANNEL_ID:-weatherStar4000}
+      CHANNEL_NAME: ${CHANNEL_NAME:-WeatherStar 4000}
+      CHANNEL_NUMBER: ${CHANNEL_NUMBER:-900}
+      CHANNEL_LOGO: ${CHANNEL_LOGO:-ws4000.png}
+      # PROGRAM_TITLE: ${PROGRAM_TITLE:-Local Weather}
+      PROGRAM_TITLE: ${PROGRAM_TITLE}
+      PROGRAM_DESC: ${PROGRAM_DESC:-"Enjoy your local weather with a touch of nostalgia."}
+      # PROGRAM_LOGO: ${PROGRAM_LOGO:-ws4000.png}
+      PROGRAM_LOGO: ${PROGRAM_LOGO}
     # ================================
     ports:
       - ${STREAM_PORT:-9798}:9798
