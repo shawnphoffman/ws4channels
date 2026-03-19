@@ -196,6 +196,49 @@ function ensureWarmupImage() {
 	spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
 }
 
+// Pre-render warmup HLS segments so clients can play immediately on connect.
+// Uses software encoding (fast, no GPU needed) to guarantee it works everywhere.
+function prerenderWarmupHLS() {
+	ensureWarmupImage()
+	// Clean stale segments
+	try {
+		for (const f of fs.readdirSync(OUTPUT_DIR)) {
+			if (f.endsWith('.ts') || f.endsWith('.m3u8')) fs.unlinkSync(path.join(OUTPUT_DIR, f))
+		}
+	} catch {}
+
+	const duration = 10 // seconds of pre-rendered content
+	const result = spawnSync('ffmpeg', [
+		'-loop', '1',
+		'-i', WARMUP_IMAGE,
+		'-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+		'-t', String(duration),
+		'-r', String(FRAME_RATE),
+		'-vf', 'scale=1280:720,format=yuv420p',
+		'-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '500k',
+		'-c:a', 'aac', '-b:a', '128k',
+		'-g', String(FRAME_RATE * 2),
+		'-keyint_min', String(FRAME_RATE),
+		'-force_key_frames', `expr:gte(t,n_forced*2)`,
+		'-f', 'hls',
+		'-hls_time', String(HLS_SEGMENT_DURATION),
+		'-hls_list_size', '5',
+		'-hls_flags', 'delete_segments+append_list',
+		'-hls_init_time', '1',
+		HLS_FILE,
+	], { timeout: 30000 })
+
+	if (result.status === 0) {
+		// Count segments so the live pipeline continues numbering
+		const segments = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('.ts'))
+		seqNumber = segments.length
+		isStreamReady = true
+		console.log(`[ws4channels] Warmup HLS ready (${segments.length} segments pre-rendered)`)
+	} else {
+		console.warn('[ws4channels] Warmup HLS pre-render failed:', result.stderr?.toString().split('\n').pop())
+	}
+}
+
 // ─── Audio feeder ─────────────────────────────────────────────────────────────
 // Runs permanently alongside ffmpeg, feeding PCM audio from the mp3 playlist.
 // Stays running during both warmup and live modes — audio never stops.
@@ -669,7 +712,10 @@ app.listen(STREAM_PORT, async () => {
 	console.log(`[ws4channels] Listening on :${STREAM_PORT}`)
 	createAudioInputFile()
 
-	// Start the persistent stream on the warmup image
+	// Pre-render warmup HLS so clients can play immediately
+	prerenderWarmupHLS()
+
+	// Start the persistent ffmpeg pipeline (continues from pre-rendered segments)
 	await initStream()
 
 	if (DEBUG_SLEEP_MS > 0) {
