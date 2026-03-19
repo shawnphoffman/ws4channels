@@ -1,9 +1,12 @@
 FROM node:22
 
-# Install FFmpeg and Chromium (system browser for Puppeteer)
+# Install FFmpeg, Chromium, and VA-API drivers for hardware encoding
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ffmpeg \
 	chromium \
+	vainfo \
+	mesa-va-drivers \
+	i965-va-driver \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Use system Chromium instead of Puppeteer's bundled download
