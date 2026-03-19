@@ -22,9 +22,6 @@ RUN npm install
 
 # Copy application code, music, and logo files
 COPY . .
-RUN mkdir -p /app/music /app/logo
-COPY music/*.mp3 /app/music/
-COPY logo/*.png /app/logo/
 
 # Use STREAM_PORT environment variable for dynamic port
 EXPOSE $STREAM_PORT

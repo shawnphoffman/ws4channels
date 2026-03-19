@@ -499,6 +499,7 @@ async function launchBrowser() {
 			defaultViewport: null,
 		})
 		page = await browser.newPage()
+		await page.setCacheEnabled(false)
 		await page.goto(buildWS4KPUrl(), { waitUntil: 'domcontentloaded', timeout: 15000 })
 		try {
 			await page.waitForSelector('div#container', { timeout: 15000 })
