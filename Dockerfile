@@ -1,20 +1,14 @@
 FROM node:18
 
-# Install FFmpeg and Puppeteer dependencies
-RUN apt-get update && apt-get install -y \
+# Install FFmpeg and Chromium (system browser for Puppeteer)
+RUN apt-get update && apt-get install -y --no-install-recommends \
 ffmpeg \
-libnss3 \
-libatk1.0-0 \
-libatk-bridge2.0-0 \
-libcups2 \
-libdrm2 \
-libxkbcommon0 \
-libxcomposite1 \
-libxdamage1 \
-libxrandr2 \
-libgbm1 \
-libasound2 \
+chromium \
 && rm -rf /var/lib/apt/lists/*
+
+# Use system Chromium instead of Puppeteer's bundled download
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY package*.json ./
@@ -26,4 +20,3 @@ COPY . .
 # Use STREAM_PORT environment variable for dynamic port
 EXPOSE $STREAM_PORT
 CMD ["node", "index.js"]
-
