@@ -116,6 +116,7 @@ services:
       WS4KP_HOST: ws4kp-fork
       WS4KP_PORT: ${WS4KP_PORT:-8080}
       FRAME_RATE: ${FRAME_RATE:-5}
+      DEBUG_SLEEP: ${DEBUG_SLEEP:-0}
       # Software encoding (default, works everywhere)
       # VIDEO_OPTIONS: default
       # Intel Quick Sync
