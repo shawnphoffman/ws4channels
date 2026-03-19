@@ -30,6 +30,7 @@ const PROGRAM_LOGO = process.env.PROGRAM_LOGO || CHANNEL_LOGO
 
 let IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_SECONDS || '300', 10) * 1000
 if (Number.isNaN(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0) IDLE_TIMEOUT_MS = 0
+const DEBUG_SLEEP_MS = Math.max(0, parseInt(process.env.DEBUG_SLEEP || '0', 10)) * 1000
 
 // ─── Video encoding config ────────────────────────────────────────────────────
 // VIDEO_OPTIONS env var:
@@ -661,6 +662,7 @@ console.log(`[ws4channels] v${VERSION} | ${cpus} CPU cores | ${memoryMB}MB RAM`)
 console.log(`[ws4channels] Encoder: ${VIDEO_CONFIG.preset} (${VIDEO_CONFIG.codec})`)
 console.log(`[ws4channels] Idle timeout: ${IDLE_TIMEOUT_MS > 0 ? IDLE_TIMEOUT_MS / 1000 + 's' : 'disabled'}`)
 if (ZIP_CODE) console.log(`[ws4channels] ZIP: ${ZIP_CODE}`)
+if (DEBUG_SLEEP_MS > 0) console.log(`[ws4channels] DEBUG_SLEEP: ${DEBUG_SLEEP_MS / 1000}s`)
 
 app.listen(STREAM_PORT, async () => {
 	console.log(`[ws4channels] Listening on :${STREAM_PORT}`)
@@ -668,6 +670,11 @@ app.listen(STREAM_PORT, async () => {
 
 	// Start the persistent stream on the warmup image
 	await initStream()
+
+	if (DEBUG_SLEEP_MS > 0) {
+		console.log(`[ws4channels] DEBUG_SLEEP: waiting ${DEBUG_SLEEP_MS / 1000}s before launching browser...`)
+		await waitFor(DEBUG_SLEEP_MS)
+	}
 
 	if (IDLE_TIMEOUT_MS <= 0) {
 		// Always-on: launch browser immediately and go live
