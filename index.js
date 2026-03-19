@@ -104,6 +104,7 @@ let isLive = false // true when Puppeteer frames are the source
 let isBrowserFrozen = false
 let isStartingBrowser = false
 let isLaunching = false
+let isBooting = true // true until boot sequence finishes
 let idleTimer = null
 let restartDelay = 1000
 let seqNumber = 0 // HLS sequence counter, increments across restarts
@@ -520,6 +521,19 @@ async function startBrowserCapture() {
 		if (isBrowserFrozen) {
 			thawBrowser()
 			await waitFor(200)
+			// Reload page after thaw — ws4kp's JS timers and fetches are stale
+			if (page && !page.isClosed()) {
+				console.log('[ws4channels] Reloading page after thaw...')
+				await page.goto(buildWS4KPUrl(), { waitUntil: 'domcontentloaded', timeout: 15000 })
+				try {
+					await page.waitForSelector('div#container', { timeout: 15000 })
+					await waitFor(1000)
+				} catch {
+					console.warn('[ws4channels] Container not found after thaw, capturing anyway')
+				}
+			} else {
+				await launchBrowser()
+			}
 		} else if (!browser) {
 			await launchBrowser()
 		}
@@ -589,10 +603,7 @@ function resetIdleTimer() {
 app.use('/stream', async (req, res, next) => {
 	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
-		if (!isLive && !isStartingBrowser && (isBrowserFrozen || browser)) {
-			startBrowserCapture()
-		} else if (!isLive && !isStartingBrowser && !browser) {
-			// Browser not yet launched (first boot with idle mode on)
+		if (!isBooting && !isLive && !isStartingBrowser) {
 			startBrowserCapture()
 		}
 	}
@@ -660,12 +671,14 @@ app.listen(STREAM_PORT, async () => {
 	if (IDLE_TIMEOUT_MS <= 0) {
 		// Always-on: launch browser immediately and go live
 		await launchBrowser()
+		isBooting = false
 		startLiveCapture()
 	} else {
 		// Launch browser, freeze it, wait for first viewer
 		console.log('[ws4channels] Launching browser to pre-load, then freezing...')
 		await launchBrowser()
 		freezeBrowser()
+		isBooting = false
 		console.log('[ws4channels] Ready. Warmup streaming. Browser frozen until first viewer.')
 	}
 })
