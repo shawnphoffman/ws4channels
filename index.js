@@ -1,5 +1,5 @@
 const express = require('express')
-const puppeteer = require('puppeteer')
+const puppeteer = require('puppeteer-core')
 const ffmpeg = require('fluent-ffmpeg')
 const path = require('path')
 const fs = require('fs')
@@ -485,7 +485,7 @@ async function launchBrowser() {
 	try {
 		if (browser) await browser.close().catch(() => {})
 		browser = await puppeteer.launch({
-			headless: 'new',
+			headless: true,
 			executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
 			args: [
 				'--no-sandbox',

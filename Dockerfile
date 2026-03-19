@@ -1,4 +1,4 @@
-FROM node:18
+FROM node:22
 
 # Install FFmpeg and Chromium (system browser for Puppeteer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
