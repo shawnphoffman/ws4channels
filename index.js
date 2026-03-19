@@ -196,8 +196,11 @@ function ensureWarmupImage() {
 		console.log('[ws4channels] No warmup image found — generating placeholder')
 		spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
 	}
-	// Convert to JPEG for image2pipe (which expects MJPEG, not PNG)
-	const result = spawnSync('ffmpeg', ['-y', '-i', WARMUP_IMAGE, '-vframes', '1', '-q:v', '2', WARMUP_JPEG])
+	// Convert to JPEG at exactly 1280x720 for image2pipe (which expects MJPEG, not PNG).
+	// Resolution MUST match the Puppeteer viewport (1280x720) — if they differ,
+	// vaapi's hwupload can't reinitialize its surface pool and ffmpeg crashes with
+	// "Error reinitializing filters!" when switching from warmup to live frames.
+	const result = spawnSync('ffmpeg', ['-y', '-i', WARMUP_IMAGE, '-vframes', '1', '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2', '-q:v', '2', WARMUP_JPEG])
 	if (result.status !== 0) {
 		console.error('[ws4channels] Failed to convert warmup image to JPEG')
 	} else {
@@ -349,7 +352,12 @@ async function startFFmpeg() {
 			isLive = false
 			ffmpegProc = null
 			inputPipe = null
+			// Stop ALL frame sources so stale intervals don't write to the next pipe
 			stopWarmupFeeder()
+			if (captureInterval) {
+				clearInterval(captureInterval)
+				captureInterval = null
+			}
 			// Restart after backoff
 			await waitFor(restartDelay)
 			restartDelay = Math.min(restartDelay * 2, 30000)
