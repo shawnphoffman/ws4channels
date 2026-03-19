@@ -16,7 +16,8 @@ const WS4KP_HOST = process.env.WS4KP_HOST || 'localhost'
 const WS4KP_PORT = process.env.WS4KP_PORT || '8080'
 const STREAM_PORT = process.env.STREAM_PORT || '9798'
 const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
-const FRAME_RATE = parseInt(process.env.FRAME_RATE || '10')
+const CAPTURE_RATE = parseInt(process.env.FRAME_RATE || '10') // screenshot capture rate
+const OUTPUT_FPS = 30 // smooth output for audio; ffmpeg duplicates frames as needed
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '900'
 const ZIP_CODE = process.env.ZIP_CODE || ''
 
@@ -45,19 +46,19 @@ const VIDEO_PRESETS = {
 		codec: 'libx264',
 		outputArgs: ['-preset', 'ultrafast', '-b:v', '500k'],
 		inputArgs: [],
-		vf: 'scale=1280:720,format=yuv420p',
+		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=yuv420p`,
 	},
 	qsv: {
 		codec: 'h264_qsv',
 		outputArgs: ['-b:v', '500k', '-global_quality', '25'],
 		inputArgs: ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw'],
-		vf: 'scale=1280:720,format=nv12,hwupload=extra_hw_frames=64',
+		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=nv12,hwupload=extra_hw_frames=64`,
 	},
 	vaapi: {
 		codec: 'h264_vaapi',
 		outputArgs: ['-b:v', '500k'],
 		inputArgs: ['-vaapi_device', '/dev/dri/renderD128'],
-		vf: 'scale=1280:720,format=nv12,hwupload',
+		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=nv12,hwupload`,
 	},
 }
 
@@ -68,7 +69,7 @@ function getVideoConfig() {
 	const codecIndex = opts.indexOf('-c:v')
 	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
 	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
-	return { codec, outputArgs: extra, inputArgs: [], vf: 'scale=1280:720,format=yuv420p', preset: 'custom' }
+	return { codec, outputArgs: extra, inputArgs: [], vf: `fps=${OUTPUT_FPS},scale=1280:720,format=yuv420p`, preset: 'custom' }
 }
 
 const VIDEO_CONFIG = getVideoConfig()
@@ -214,7 +215,7 @@ function hasAudioFiles() {
 
 // ─── Warmup frame feeder ──────────────────────────────────────────────────────
 // Reads the warmup image from disk and pushes JPEG frames into the input pipe
-// at FRAME_RATE. This is the "warmup source" — same pipe ffmpeg always reads from,
+// at CAPTURE_RATE. This is the "warmup source" — same pipe ffmpeg always reads from,
 // just different content than live Puppeteer frames.
 
 function startWarmupFeeder() {
@@ -226,7 +227,7 @@ function startWarmupFeeder() {
 
 	warmupFeeder = setInterval(() => {
 		if (inputPipe?.writable) inputPipe.write(imageData)
-	}, 1000 / FRAME_RATE)
+	}, 1000 / CAPTURE_RATE)
 }
 
 function stopWarmupFeeder() {
@@ -262,11 +263,11 @@ async function startFFmpeg() {
 	proc
 		.input(inputPipe)
 		.inputFormat('image2pipe')
-		.inputOptions(['-c:v mjpeg', `-framerate ${FRAME_RATE}`])
+		.inputOptions(['-c:v mjpeg', `-framerate ${CAPTURE_RATE}`])
 
 	if (audioReady) {
 		// Feed music directly as a second input — same process, same clock
-		proc.input(AUDIO_LIST).inputOptions(['-f', 'concat', '-safe', '0', '-stream_loop', '-1'])
+		proc.input(AUDIO_LIST).inputOptions(['-re', '-f', 'concat', '-safe', '0', '-stream_loop', '-1'])
 		console.log('[ws4channels] Audio: music playlist (direct input)')
 	} else {
 		proc.input('anullsrc=channel_layout=stereo:sample_rate=44100').inputOptions(['-f', 'lavfi'])
@@ -286,9 +287,9 @@ async function startFFmpeg() {
 			'-b:a',
 			'128k',
 			'-g',
-			String(FRAME_RATE * 2),
+			String(OUTPUT_FPS * 2),
 			'-keyint_min',
-			String(FRAME_RATE),
+			String(OUTPUT_FPS),
 			'-force_key_frames',
 			'expr:gte(t,n_forced*2)',
 			'-flush_packets',
@@ -399,7 +400,7 @@ function startLiveCapture() {
 			console.warn('[ws4channels] Capture error:', err.message)
 			await launchBrowser().catch(() => {})
 		}
-	}, 1000 / FRAME_RATE)
+	}, 1000 / CAPTURE_RATE)
 }
 
 // ─── Switch to warmup ─────────────────────────────────────────────────────────
