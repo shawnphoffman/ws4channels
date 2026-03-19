@@ -105,6 +105,7 @@ let isBrowserFrozen = false
 let isStartingBrowser = false
 let isLaunching = false
 let isInitialising = false // guard against concurrent initStream calls
+let isBooting = true // true during boot sequence — prevents middleware from launching browser
 let idleTimer = null
 let restartDelay = 1000
 let seqNumber = 0 // HLS sequence counter, increments across restarts
@@ -515,6 +516,7 @@ async function launchBrowser() {
 		browser = await puppeteer.launch({
 			headless: true,
 			executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+			protocolTimeout: 30000,
 			args: [
 				'--no-sandbox',
 				'--disable-setuid-sandbox',
@@ -640,8 +642,8 @@ function resetIdleTimer() {
 app.use('/stream', async (req, res, next) => {
 	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
-		if (!isLive && !isStartingBrowser) {
-			console.log(`[ws4channels] Viewer request: ${req.path} — triggering go-live (isLive=${isLive}, isStarting=${isStartingBrowser}, isReady=${isStreamReady})`)
+		if (!isLive && !isStartingBrowser && !isBooting) {
+			console.log(`[ws4channels] Viewer request: ${req.path} — triggering go-live`)
 			startBrowserCapture()
 		}
 	}
@@ -720,12 +722,14 @@ app.listen(STREAM_PORT, async () => {
 	if (IDLE_TIMEOUT_MS <= 0) {
 		// Always-on: launch browser and go live immediately
 		await launchBrowser()
+		isBooting = false
 		startLiveCapture()
 	} else {
 		// Launch browser, freeze it, wait for first viewer to trigger go-live
 		console.log('[ws4channels] Launching browser to pre-load, then freezing...')
 		await launchBrowser()
 		freezeBrowser()
+		isBooting = false
 		console.log('[ws4channels] Ready. Warmup streaming. Browser frozen until first viewer.')
 	}
 })
