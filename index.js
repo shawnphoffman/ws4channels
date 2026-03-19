@@ -45,19 +45,19 @@ const VIDEO_PRESETS = {
 		codec: 'libx264',
 		outputArgs: ['-preset', 'ultrafast', '-b:v', '500k'],
 		inputArgs: [],
-		vf: 'scale=1280:720,format=yuv420p',
+		vf: 'format=yuv420p,scale=1280:720',
 	},
 	qsv: {
 		codec: 'h264_qsv',
 		outputArgs: ['-b:v', '500k', '-global_quality', '25'],
 		inputArgs: ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw'],
-		vf: 'scale=1280:720,format=nv12,hwupload=extra_hw_frames=64',
+		vf: 'format=yuv420p,scale=1280:720,format=nv12,hwupload=extra_hw_frames=64',
 	},
 	vaapi: {
 		codec: 'h264_vaapi',
 		outputArgs: ['-b:v', '500k'],
 		inputArgs: ['-vaapi_device', '/dev/dri/renderD128'],
-		vf: 'scale=1280:720,format=nv12,hwupload',
+		vf: 'format=yuv420p,scale=1280:720,format=nv12,hwupload',
 	},
 }
 
@@ -68,7 +68,7 @@ function getVideoConfig() {
 	const codecIndex = opts.indexOf('-c:v')
 	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
 	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
-	return { codec, outputArgs: extra, inputArgs: [], vf: 'scale=1280:720,format=yuv420p', preset: 'custom' }
+	return { codec, outputArgs: extra, inputArgs: [], vf: 'format=yuv420p,scale=1280:720', preset: 'custom' }
 }
 
 const VIDEO_CONFIG = getVideoConfig()
