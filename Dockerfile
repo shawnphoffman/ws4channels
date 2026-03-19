@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	vainfo \
 	mesa-va-drivers \
 	i965-va-driver \
+	intel-media-va-driver \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Use system Chromium instead of Puppeteer's bundled download
