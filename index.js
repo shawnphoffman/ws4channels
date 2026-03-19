@@ -4,7 +4,7 @@ const ffmpeg = require('fluent-ffmpeg')
 const path = require('path')
 const fs = require('fs')
 const { PassThrough } = require('stream')
-const { spawnSync, spawn } = require('child_process')
+const { spawnSync } = require('child_process')
 const os = require('os')
 
 const app = express()
@@ -96,7 +96,6 @@ app.use('/logo', express.static(LOGO_DIR))
 let ffmpegProc = null // the single persistent ffmpeg process
 let inputPipe = null // current active PassThrough being written to ffmpeg stdin
 let warmupFeeder = null // setInterval pushing warmup frames into inputPipe
-let audioFeeder = null // child ffmpeg process feeding PCM to FIFO
 let browser = null
 let page = null
 let captureInterval = null
@@ -105,7 +104,7 @@ let isLive = false // true when Puppeteer frames are the source
 let isBrowserFrozen = false
 let isStartingBrowser = false
 let isLaunching = false
-let isBooting = true // true until boot sequence finishes
+let isInitialising = false // guard against concurrent initStream calls
 let idleTimer = null
 let restartDelay = 1000
 let seqNumber = 0 // HLS sequence counter, increments across restarts
@@ -196,115 +195,21 @@ function ensureWarmupImage() {
 	spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
 }
 
-// Pre-render warmup HLS segments so clients can play immediately on connect.
-// Uses software encoding (fast, no GPU needed) to guarantee it works everywhere.
-function prerenderWarmupHLS() {
-	ensureWarmupImage()
-	// Clean stale segments
+// Clean stale HLS segments from previous runs
+function cleanOutputDir() {
 	try {
 		for (const f of fs.readdirSync(OUTPUT_DIR)) {
 			if (f.endsWith('.ts') || f.endsWith('.m3u8')) fs.unlinkSync(path.join(OUTPUT_DIR, f))
 		}
 	} catch {}
-
-	const duration = 10 // seconds of pre-rendered content
-	const result = spawnSync('ffmpeg', [
-		'-loop', '1',
-		'-i', WARMUP_IMAGE,
-		'-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-		'-t', String(duration),
-		'-r', String(FRAME_RATE),
-		'-vf', 'scale=1280:720,format=yuv420p',
-		'-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '500k',
-		'-c:a', 'aac', '-b:a', '128k',
-		'-g', String(FRAME_RATE * 2),
-		'-keyint_min', String(FRAME_RATE),
-		'-force_key_frames', `expr:gte(t,n_forced*2)`,
-		'-f', 'hls',
-		'-hls_time', String(HLS_SEGMENT_DURATION),
-		'-hls_list_size', '5',
-		'-hls_flags', 'delete_segments+append_list',
-		'-hls_init_time', '1',
-		HLS_FILE,
-	], { timeout: 30000 })
-
-	if (result.status === 0) {
-		// Count segments so the live pipeline continues numbering
-		const segments = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('.ts'))
-		seqNumber = segments.length
-		isStreamReady = true
-		console.log(`[ws4channels] Warmup HLS ready (${segments.length} segments pre-rendered)`)
-	} else {
-		console.warn('[ws4channels] Warmup HLS pre-render failed:', result.stderr?.toString().split('\n').pop())
-	}
 }
 
-// ─── Audio feeder ─────────────────────────────────────────────────────────────
-// Runs permanently alongside ffmpeg, feeding PCM audio from the mp3 playlist.
-// Stays running during both warmup and live modes — audio never stops.
+// ─── Audio ──────────────────────────────────────────────────────────────────
+// Music is fed directly as a second input to the main ffmpeg process (concat
+// demuxer with infinite loop). One process, one clock — no A/V sync drift.
 
-const AUDIO_FIFO = path.join(OUTPUT_DIR, 'audio_fifo')
-
-function startAudioFeeder() {
-	stopAudioFeeder()
-	if (!fs.existsSync(AUDIO_LIST)) {
-		console.warn('[ws4channels] Audio list missing — using silent audio')
-		return false
-	}
-	try {
-		fs.unlinkSync(AUDIO_FIFO)
-	} catch {}
-	if (spawnSync('mkfifo', [AUDIO_FIFO]).status !== 0) {
-		console.warn('[ws4channels] Failed to create audio FIFO — using silent audio')
-		return false
-	}
-	audioFeeder = spawn(
-		'ffmpeg',
-		[
-			'-re',
-			'-f',
-			'concat',
-			'-safe',
-			'0',
-			'-stream_loop',
-			'-1',
-			'-i',
-			AUDIO_LIST,
-			'-vn',
-			'-af',
-			'volume=0.5',
-			'-f',
-			's16le',
-			'-acodec',
-			'pcm_s16le',
-			'-ar',
-			'44100',
-			'-ac',
-			'2',
-			'-y',
-			AUDIO_FIFO,
-		],
-		{ stdio: ['pipe', 'pipe', 'pipe'] },
-	)
-	audioFeeder.on('error', err => console.warn('[ws4channels] Audio feeder error:', err.message))
-	audioFeeder.on('exit', code => {
-		if (code != null && code !== 0) console.warn('[ws4channels] Audio feeder exited:', code)
-		audioFeeder = null
-	})
-	console.log('[ws4channels] Audio feeder started (runs permanently)')
-	return true
-}
-
-function stopAudioFeeder() {
-	if (audioFeeder) {
-		try {
-			audioFeeder.kill('SIGINT')
-		} catch {}
-		audioFeeder = null
-	}
-	try {
-		fs.unlinkSync(AUDIO_FIFO)
-	} catch {}
+function hasAudioFiles() {
+	return fs.existsSync(AUDIO_LIST)
 }
 
 // ─── Warmup frame feeder ──────────────────────────────────────────────────────
@@ -333,10 +238,11 @@ function stopWarmupFeeder() {
 
 // ─── Persistent ffmpeg ────────────────────────────────────────────────────────
 // Starts once and runs forever. Reads JPEG frames from inputPipe (a PassThrough)
-// and PCM audio from AUDIO_FIFO. The source of frames written to inputPipe
+// and music directly via concat demuxer. The source of frames written to inputPipe
 // changes between warmup and live — ffmpeg never notices or cares.
+// Single process = single clock = no A/V sync drift.
 
-async function startFFmpeg(audioReady) {
+async function startFFmpeg() {
 	if (ffmpegProc) {
 		try {
 			ffmpegProc.kill('SIGINT')
@@ -348,6 +254,7 @@ async function startFFmpeg(audioReady) {
 	inputPipe = new PassThrough()
 
 	const { codec, outputArgs, inputArgs, vf } = VIDEO_CONFIG
+	const audioReady = hasAudioFiles()
 	const proc = ffmpeg()
 
 	if (inputArgs.length) proc.outputOptions(inputArgs)
@@ -358,21 +265,26 @@ async function startFFmpeg(audioReady) {
 		.inputOptions(['-c:v mjpeg', `-framerate ${FRAME_RATE}`])
 
 	if (audioReady) {
-		proc.input(AUDIO_FIFO).inputOptions(['-f s16le', '-ar 44100', '-ac 2'])
+		// Feed music directly as a second input — same process, same clock
+		proc.input(AUDIO_LIST).inputOptions(['-f', 'concat', '-safe', '0', '-stream_loop', '-1'])
+		console.log('[ws4channels] Audio: music playlist (direct input)')
 	} else {
 		proc.input('anullsrc=channel_layout=stereo:sample_rate=44100').inputOptions(['-f', 'lavfi'])
+		console.log('[ws4channels] Audio: silent')
 	}
+
+	const audioFilter = audioReady ? 'volume=0.5' : 'anull'
 
 	proc
 		.outputOptions([
 			'-vf',
 			vf,
+			'-af',
+			audioFilter,
 			'-c:a',
 			'aac',
 			'-b:a',
 			'128k',
-			'-async',
-			'1',
 			'-g',
 			String(FRAME_RATE * 2),
 			'-keyint_min',
@@ -398,8 +310,7 @@ async function startFFmpeg(audioReady) {
 		.videoCodec(codec)
 		.output(HLS_FILE)
 		.on('start', cmd => {
-			console.log(`[ws4channels] ffmpeg started (${audioReady ? 'with music' : 'silent'})`)
-			isStreamReady = true
+			console.log('[ws4channels] ffmpeg started')
 		})
 		.on('error', async err => {
 			// Ignore intentional kills
@@ -425,21 +336,44 @@ async function startFFmpeg(audioReady) {
 	ffmpegProc = proc
 	proc.run()
 
-	// Give ffmpeg a moment to start accepting frames
-	await waitFor(500)
+	// Wait for ffmpeg to start and produce the first HLS segment
+	let waited = 0
+	while (!isStreamReady && waited < 10000) {
+		try {
+			const content = fs.readFileSync(HLS_FILE, 'utf8')
+			if (content.includes('.ts')) {
+				isStreamReady = true
+				break
+			}
+		} catch {}
+		await waitFor(250)
+		waited += 250
+	}
+
+	if (isStreamReady) {
+		console.log(`[ws4channels] HLS stream ready (${waited}ms)`)
+	} else {
+		isStreamReady = true
+		console.warn('[ws4channels] HLS stream timeout — marking ready anyway')
+	}
 }
 
 // ─── Stream init ──────────────────────────────────────────────────────────────
 // Called once at boot (and after errors). Starts audio, ffmpeg, and warmup feeder.
 
 async function initStream() {
-	console.log('[ws4channels] Initialising stream...')
-	ensureWarmupImage()
-	const audioReady = startAudioFeeder()
-	await startFFmpeg(audioReady)
-	startWarmupFeeder()
-	restartDelay = 1000
-	console.log('[ws4channels] Stream live on warmup image')
+	if (isInitialising) return
+	isInitialising = true
+	try {
+		console.log('[ws4channels] Initialising stream...')
+		ensureWarmupImage()
+		await startFFmpeg()
+		startWarmupFeeder()
+		restartDelay = 1000
+		console.log('[ws4channels] Stream live on warmup image')
+	} finally {
+		isInitialising = false
+	}
 }
 
 // ─── Switch to live ───────────────────────────────────────────────────────────
@@ -583,6 +517,13 @@ async function startBrowserCapture() {
 		} else if (!browser) {
 			await launchBrowser()
 		}
+
+		// DEBUG_SLEEP: keep warmup visible for N seconds after viewer triggers go-live
+		if (DEBUG_SLEEP_MS > 0) {
+			console.log(`[ws4channels] DEBUG_SLEEP: showing warmup for ${DEBUG_SLEEP_MS / 1000}s before switching to live...`)
+			await waitFor(DEBUG_SLEEP_MS)
+		}
+
 		startLiveCapture()
 	} catch (err) {
 		console.error('[ws4channels] Browser startup failed:', err.message)
@@ -609,7 +550,6 @@ async function stopEverything() {
 		clearInterval(captureInterval)
 		captureInterval = null
 	}
-	stopAudioFeeder()
 	if (isBrowserFrozen) thawBrowser()
 	if (browser) {
 		await browser.close().catch(() => {})
@@ -649,16 +589,16 @@ function resetIdleTimer() {
 app.use('/stream', async (req, res, next) => {
 	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
-		if (!isBooting && !isLive && !isStartingBrowser) {
+		if (!isLive && !isStartingBrowser) {
 			startBrowserCapture()
 		}
 	}
 
 	if (!isStreamReady) {
 		let waited = 0
-		while (!isStreamReady && waited < 8000) {
-			await waitFor(200)
-			waited += 200
+		while (!isStreamReady && waited < 10000) {
+			await waitFor(250)
+			waited += 250
 		}
 	}
 
@@ -712,28 +652,24 @@ app.listen(STREAM_PORT, async () => {
 	console.log(`[ws4channels] Listening on :${STREAM_PORT}`)
 	createAudioInputFile()
 
-	// Pre-render warmup HLS so clients can play immediately
-	prerenderWarmupHLS()
+	// Clean stale segments from previous runs
+	cleanOutputDir()
 
-	// Start the persistent ffmpeg pipeline (continues from pre-rendered segments)
+	// Start the persistent ffmpeg pipeline with warmup feeder.
+	// Uses the SAME encoder as live (no codec mismatch).
+	// Warmup is immediately playable once ffmpeg produces the first HLS segment.
 	await initStream()
 
-	if (DEBUG_SLEEP_MS > 0) {
-		console.log(`[ws4channels] DEBUG_SLEEP: waiting ${DEBUG_SLEEP_MS / 1000}s before launching browser...`)
-		await waitFor(DEBUG_SLEEP_MS)
-	}
-
+	// Pre-launch browser so it's ready when first viewer connects
 	if (IDLE_TIMEOUT_MS <= 0) {
-		// Always-on: launch browser immediately and go live
+		// Always-on: launch browser and go live immediately
 		await launchBrowser()
-		isBooting = false
 		startLiveCapture()
 	} else {
-		// Launch browser, freeze it, wait for first viewer
+		// Launch browser, freeze it, wait for first viewer to trigger go-live
 		console.log('[ws4channels] Launching browser to pre-load, then freezing...')
 		await launchBrowser()
 		freezeBrowser()
-		isBooting = false
 		console.log('[ws4channels] Ready. Warmup streaming. Browser frozen until first viewer.')
 	}
 })
