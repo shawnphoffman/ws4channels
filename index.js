@@ -220,13 +220,25 @@ function hasAudioFiles() {
 
 function startWarmupFeeder() {
 	stopWarmupFeeder()
-	if (!fs.existsSync(WARMUP_IMAGE)) return
+	if (!fs.existsSync(WARMUP_IMAGE)) {
+		console.warn('[ws4channels] Warmup image not found:', WARMUP_IMAGE)
+		return
+	}
 
 	const imageData = fs.readFileSync(WARMUP_IMAGE)
-	console.log('[ws4channels] Warmup feeder started — looping image into stream')
+	console.log(`[ws4channels] Warmup feeder started (${imageData.length} bytes, ${CAPTURE_RATE}fps → pipe)`)
 
+	let frameCount = 0
 	warmupFeeder = setInterval(() => {
-		if (inputPipe?.writable) inputPipe.write(imageData)
+		if (inputPipe?.writable) {
+			inputPipe.write(imageData)
+			frameCount++
+			// Log first frame and then every 300 frames (~30s at 10fps)
+			if (frameCount === 1) console.log('[ws4channels] Warmup: first frame written to pipe')
+			else if (frameCount % 300 === 0) console.log(`[ws4channels] Warmup: ${frameCount} frames written`)
+		} else if (frameCount === 0) {
+			console.warn('[ws4channels] Warmup: pipe not writable, skipping frame')
+		}
 	}, 1000 / CAPTURE_RATE)
 }
 
@@ -312,6 +324,13 @@ async function startFFmpeg() {
 		.output(HLS_FILE)
 		.on('start', cmd => {
 			console.log('[ws4channels] ffmpeg started')
+			console.log(`[ws4channels] ffmpeg cmd: ${cmd}`)
+		})
+		.on('stderr', line => {
+			// Log ffmpeg progress/status lines for debugging
+			if (line.includes('Error') || line.includes('error') || line.includes('Opening') || line.includes('Output #')) {
+				console.log(`[ws4channels] ffmpeg: ${line.trim()}`)
+			}
 		})
 		.on('error', async err => {
 			// Ignore intentional kills
@@ -337,9 +356,14 @@ async function startFFmpeg() {
 	ffmpegProc = proc
 	proc.run()
 
+	// Start feeding frames IMMEDIATELY so video and audio PTS stay in sync.
+	// Without this, audio (-re) races ahead while video pipe is empty → PTS
+	// mismatch → ffmpeg stalls and never produces HLS segments.
+	startWarmupFeeder()
+
 	// Wait for ffmpeg to start and produce the first HLS segment
 	let waited = 0
-	while (!isStreamReady && waited < 10000) {
+	while (!isStreamReady && waited < 15000) {
 		try {
 			const content = fs.readFileSync(HLS_FILE, 'utf8')
 			if (content.includes('.ts')) {
@@ -369,7 +393,8 @@ async function initStream() {
 		console.log('[ws4channels] Initialising stream...')
 		ensureWarmupImage()
 		await startFFmpeg()
-		startWarmupFeeder()
+		// warmup feeder is started inside startFFmpeg() right after proc.run()
+		// so video frames flow immediately — keeping PTS in sync with audio
 		restartDelay = 1000
 		console.log('[ws4channels] Stream live on warmup image')
 	} finally {
@@ -386,15 +411,23 @@ function startLiveCapture() {
 	isLive = true
 	console.log('[ws4channels] Switched to live browser capture')
 
+	let liveFrameCount = 0
 	captureInterval = setInterval(async () => {
-		if (!inputPipe?.writable || !page) return
+		if (!inputPipe?.writable || !page) {
+			if (liveFrameCount === 0) console.warn('[ws4channels] Live: pipe not writable or page missing')
+			return
+		}
 		try {
 			if (page.isClosed()) {
+				console.warn('[ws4channels] Live: page closed, relaunching browser')
 				await launchBrowser()
 				return
 			}
 			const frame = await page.screenshot({ type: 'jpeg', quality: 80 })
 			inputPipe.write(frame)
+			liveFrameCount++
+			if (liveFrameCount === 1) console.log(`[ws4channels] Live: first frame captured (${frame.length} bytes)`)
+			else if (liveFrameCount % 300 === 0) console.log(`[ws4channels] Live: ${liveFrameCount} frames captured`)
 		} catch (err) {
 			if (!isLive) return
 			console.warn('[ws4channels] Capture error:', err.message)
@@ -591,15 +624,20 @@ app.use('/stream', async (req, res, next) => {
 	if (req.path.endsWith('.ts') || req.path.endsWith('.m3u8')) {
 		resetIdleTimer()
 		if (!isLive && !isStartingBrowser) {
+			console.log(`[ws4channels] Viewer request: ${req.path} — triggering go-live (isLive=${isLive}, isStarting=${isStartingBrowser}, isReady=${isStreamReady})`)
 			startBrowserCapture()
 		}
 	}
 
 	if (!isStreamReady) {
+		console.log(`[ws4channels] Stream not ready, waiting... (${req.path})`)
 		let waited = 0
-		while (!isStreamReady && waited < 10000) {
+		while (!isStreamReady && waited < 15000) {
 			await waitFor(250)
 			waited += 250
+		}
+		if (!isStreamReady) {
+			console.warn(`[ws4channels] Stream still not ready after ${waited}ms — serving anyway`)
 		}
 	}
 
