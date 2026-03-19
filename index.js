@@ -16,8 +16,7 @@ const WS4KP_HOST = process.env.WS4KP_HOST || 'localhost'
 const WS4KP_PORT = process.env.WS4KP_PORT || '8080'
 const STREAM_PORT = process.env.STREAM_PORT || '9798'
 const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`
-const CAPTURE_RATE = parseInt(process.env.FRAME_RATE || '10') // screenshot capture rate
-const OUTPUT_FPS = 30 // smooth output for audio; ffmpeg duplicates frames as needed
+const CAPTURE_RATE = parseInt(process.env.FRAME_RATE || '10') // screenshot & output fps
 const CHANNEL_NUM = process.env.CHANNEL_NUMBER || '900'
 const ZIP_CODE = process.env.ZIP_CODE || ''
 
@@ -46,19 +45,19 @@ const VIDEO_PRESETS = {
 		codec: 'libx264',
 		outputArgs: ['-preset', 'ultrafast', '-b:v', '500k'],
 		inputArgs: [],
-		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=yuv420p`,
+		vf: 'scale=1280:720,format=yuv420p',
 	},
 	qsv: {
 		codec: 'h264_qsv',
 		outputArgs: ['-b:v', '500k', '-global_quality', '25'],
 		inputArgs: ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw'],
-		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=nv12,hwupload=extra_hw_frames=64`,
+		vf: 'scale=1280:720,format=nv12,hwupload=extra_hw_frames=64',
 	},
 	vaapi: {
 		codec: 'h264_vaapi',
 		outputArgs: ['-b:v', '500k'],
 		inputArgs: ['-vaapi_device', '/dev/dri/renderD128'],
-		vf: `fps=${OUTPUT_FPS},scale=1280:720,format=nv12,hwupload`,
+		vf: 'scale=1280:720,format=nv12,hwupload',
 	},
 }
 
@@ -69,7 +68,7 @@ function getVideoConfig() {
 	const codecIndex = opts.indexOf('-c:v')
 	const codec = codecIndex !== -1 ? opts[codecIndex + 1] : 'libx264'
 	const extra = opts.filter((_, i) => i !== codecIndex && i !== codecIndex + 1)
-	return { codec, outputArgs: extra, inputArgs: [], vf: `fps=${OUTPUT_FPS},scale=1280:720,format=yuv420p`, preset: 'custom' }
+	return { codec, outputArgs: extra, inputArgs: [], vf: 'scale=1280:720,format=yuv420p', preset: 'custom' }
 }
 
 const VIDEO_CONFIG = getVideoConfig()
@@ -190,10 +189,20 @@ function generateXMLTV(host) {
 	return xml + '\n</tv>'
 }
 
+const WARMUP_JPEG = path.join(OUTPUT_DIR, 'warmup.jpg')
+
 function ensureWarmupImage() {
-	if (fs.existsSync(WARMUP_IMAGE)) return
-	console.log('[ws4channels] No warmup image found — generating placeholder')
-	spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
+	if (!fs.existsSync(WARMUP_IMAGE)) {
+		console.log('[ws4channels] No warmup image found — generating placeholder')
+		spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0x1a1a2e:size=1280x720:rate=1', '-vframes', '1', '-q:v', '2', WARMUP_IMAGE])
+	}
+	// Convert to JPEG for image2pipe (which expects MJPEG, not PNG)
+	const result = spawnSync('ffmpeg', ['-y', '-i', WARMUP_IMAGE, '-vframes', '1', '-q:v', '2', WARMUP_JPEG])
+	if (result.status !== 0) {
+		console.error('[ws4channels] Failed to convert warmup image to JPEG')
+	} else {
+		console.log(`[ws4channels] Warmup image ready: ${fs.statSync(WARMUP_JPEG).size} bytes JPEG`)
+	}
 }
 
 // Clean stale HLS segments from previous runs
@@ -220,13 +229,13 @@ function hasAudioFiles() {
 
 function startWarmupFeeder() {
 	stopWarmupFeeder()
-	if (!fs.existsSync(WARMUP_IMAGE)) {
-		console.warn('[ws4channels] Warmup image not found:', WARMUP_IMAGE)
+	if (!fs.existsSync(WARMUP_JPEG)) {
+		console.warn('[ws4channels] Warmup JPEG not found:', WARMUP_JPEG)
 		return
 	}
 
-	const imageData = fs.readFileSync(WARMUP_IMAGE)
-	console.log(`[ws4channels] Warmup feeder started (${imageData.length} bytes, ${CAPTURE_RATE}fps → pipe)`)
+	const imageData = fs.readFileSync(WARMUP_JPEG)
+	console.log(`[ws4channels] Warmup feeder started (${imageData.length} bytes JPEG, ${CAPTURE_RATE}fps → pipe)`)
 
 	let frameCount = 0
 	warmupFeeder = setInterval(() => {
@@ -299,9 +308,9 @@ async function startFFmpeg() {
 			'-b:a',
 			'128k',
 			'-g',
-			String(OUTPUT_FPS * 2),
+			String(CAPTURE_RATE * 2),
 			'-keyint_min',
-			String(OUTPUT_FPS),
+			String(CAPTURE_RATE),
 			'-force_key_frames',
 			'expr:gte(t,n_forced*2)',
 			'-flush_packets',
