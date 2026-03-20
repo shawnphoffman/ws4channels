@@ -288,7 +288,7 @@ async function startFFmpeg() {
 	proc
 		.input(inputPipe)
 		.inputFormat('image2pipe')
-		.inputOptions(['-c:v mjpeg', `-framerate ${CAPTURE_RATE}`])
+		.inputOptions(['-c:v mjpeg', `-framerate ${CAPTURE_RATE}`, '-reinit_filter', '0'])
 
 	if (audioReady) {
 		// Feed music directly as a second input — same process, same clock
