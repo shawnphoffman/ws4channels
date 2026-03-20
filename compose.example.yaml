@@ -2,8 +2,6 @@ x-common: &common
   restart: unless-stopped
   environment: &env
     TZ: ${TZ:-America/Los_Angeles}
-  networks:
-    - proxy_net
 
 x-health: &health
   interval: 5m
@@ -12,13 +10,7 @@ x-health: &health
   start_period: 1m
 
 # =================================================================
-networks:
-  proxy_net:
-    external: true
-    name: proxy_net
-
-# =================================================================
-name: weather-channels-fork
+name: weather-channel
 services:
   # ================================
   # weatherstar-4000
@@ -32,11 +24,6 @@ services:
       # Each argument in the permalink URL can become an environment variable on the Docker host by adding WSQS_
       # Following the "Sharing a Permalink" example below, here are a few environment variables defined. Visit that section for a
       # more complete list of configuration options.
-      # ====
-      # WSQS_latLonQuery: Orlando International Airport Orlando FL USA
-      # WSQS_hazards_checkbox: true
-      # WSQS_current_weather_checkbox: true
-      # WSQS_kiosk: true
       # ====
       WSQS_hazards-checkbox: "${WSQS_hazards_checkbox:-true}"
       WSQS_current-weather-checkbox: "${WSQS_current_weather_checkbox:-true}"
@@ -71,23 +58,6 @@ services:
     healthcheck:
       test: curl -f http://localhost:8080 || exit 1
       <<: *health
-    # ================================
-    labels:
-      # TRAEFIK
-      - traefik.enable=true
-      # Use the right network and port
-      - traefik.docker.network=proxy_net
-      - traefik.http.services.weather.loadbalancer.server.port=8080
-      # HTTPS by default
-      - traefik.http.routers.weather.rule=Host(`weather.lan.goober.house`)
-      - traefik.http.routers.weather.entrypoints=websecure
-      - traefik.http.routers.weather.tls=true
-      - traefik.http.routers.weather.tls.certresolver=cloudflare
-      # HTTP redirect to HTTPS
-      - traefik.http.routers.weather-http.entrypoints=web
-      - traefik.http.routers.weather-http.rule=Host(`weather.lan.goober.house`)
-      - traefik.http.routers.weather-http.middlewares=redir-https
-      # - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
 
   # ================================
   # ws4k -> channels dvr
@@ -106,16 +76,11 @@ services:
       - /dev/dri:/dev/dri
     cap_add:
       - SYS_PTRACE
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 1096m
-    #       cpus: 1
     environment:
       <<: *env
       WS4KP_HOST: ws4kp-fork
       WS4KP_PORT: ${WS4KP_PORT:-8080}
-      FRAME_RATE: ${FRAME_RATE:-5}
+      FRAME_RATE: ${FRAME_RATE:-10}
       DEBUG_SLEEP: ${DEBUG_SLEEP:-0}
       # Software encoding (default, works everywhere)
       # VIDEO_OPTIONS: default
@@ -134,7 +99,6 @@ services:
       PROGRAM_DESC: "${PROGRAM_DESC:-Enjoy your local weather with a touch of nostalgia.}"
       PROGRAM_LOGO: "${PROGRAM_LOGO:-ws4000.png}"
       # ── Logging ──
-      # LOG_LEVEL: error | warn | info (default) | debug
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     # ================================
     ports:
@@ -143,22 +107,3 @@ services:
     healthcheck:
       test: curl -f http://localhost:9798/guide.xml || exit 1
       <<: *health
-    # ================================
-    labels:
-      # TRAEFIK
-      - traefik.enable=true
-      # Use the right network and port
-      - traefik.docker.network=proxy_net
-      - traefik.http.services.weatherchannel.loadbalancer.server.port=9798
-      # HTTPS by default
-      - traefik.http.routers.weatherchannel.rule=Host(`weather-channel.lan.goober.house`)
-      - traefik.http.routers.weatherchannel.entrypoints=websecure
-      - traefik.http.routers.weatherchannel.tls=true
-      - traefik.http.routers.weatherchannel.tls.certresolver=cloudflare
-      - traefik.http.routers.weatherchannel.service=weatherchannel
-      # HTTP redirect to HTTPS
-      - traefik.http.routers.weatherchannel-http.entrypoints=web
-      - traefik.http.routers.weatherchannel-http.rule=Host(`weather-channel.lan.goober.house`)
-      - traefik.http.routers.weatherchannel-http.middlewares=redir-https
-      - traefik.http.routers.weatherchannel-http.service=weatherchannel
-      # - traefik.http.middlewares.redir-https.redirectscheme.scheme=https
