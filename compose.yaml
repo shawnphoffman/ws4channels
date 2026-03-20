@@ -133,6 +133,9 @@ services:
       PROGRAM_TITLE: "${PROGRAM_TITLE:-Local Weather}"
       PROGRAM_DESC: "${PROGRAM_DESC:-Enjoy your local weather with a touch of nostalgia.}"
       PROGRAM_LOGO: "${PROGRAM_LOGO:-ws4000.png}"
+      # ── Logging ──
+      # LOG_LEVEL: error | warn | info (default) | debug
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
     # ================================
     ports:
       - ${STREAM_PORT:-9798}:9798
