@@ -698,6 +698,62 @@ app.get('/guide.xml', (req, res) => {
 	res.send(generateXMLTV(host))
 })
 
+app.get('/', (req, res) => {
+	res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${CHANNEL_NAME}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.card{background:#1a1a1a;border-radius:12px;padding:2rem;max-width:420px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.5)}
+h1{font-size:1.4rem;margin-bottom:1.2rem;display:flex;align-items:center;gap:.6rem}
+.dot{width:10px;height:10px;border-radius:50%;background:#555;flex-shrink:0}
+.dot.ready{background:#4caf50}
+.dot.starting{background:#ff9800;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.info{display:grid;grid-template-columns:auto 1fr;gap:.4rem .8rem;font-size:.9rem}
+.info dt{color:#888}
+.info dd{color:#ccc}
+.links{margin-top:1.2rem;display:flex;gap:.8rem;flex-wrap:wrap}
+.links a{color:#64b5f6;text-decoration:none;font-size:.85rem;padding:.3rem .6rem;border:1px solid #333;border-radius:6px}
+.links a:hover{border-color:#64b5f6}
+</style>
+</head>
+<body>
+<div class="card">
+<h1><span class="dot" id="dot"></span><span id="title">ws4channels</span></h1>
+<dl class="info">
+<dt>Status</dt><dd id="status">checking…</dd>
+<dt>Mode</dt><dd id="mode">—</dd>
+<dt>Version</dt><dd id="version">—</dd>
+<dt>Encoder</dt><dd id="encoder">—</dd>
+</dl>
+<div class="links">
+<a href="/stream/stream.m3u8">Stream</a>
+<a href="/playlist.m3u">Playlist</a>
+<a href="/guide.xml">EPG Guide</a>
+<a href="/health">Health JSON</a>
+</div>
+</div>
+<script>
+async function poll(){try{const r=await fetch("/health");const d=await r.json();
+document.getElementById("dot").className="dot "+(d.ready?"ready":"starting");
+document.getElementById("status").textContent=d.ready?"Online":"Starting";
+document.getElementById("mode").textContent=d.mode;
+document.getElementById("version").textContent="v"+d.version;
+document.getElementById("encoder").textContent=d.encoder;
+document.getElementById("title").textContent=${JSON.stringify(CHANNEL_NAME)};
+}catch{document.getElementById("dot").className="dot";
+document.getElementById("status").textContent="Offline"}}
+poll();setInterval(poll,5000);
+</script>
+</body>
+</html>`)
+})
+
 app.get('/health', (req, res) => {
 	const mode = isLive ? 'live' : isBrowserFrozen ? 'frozen' : browser ? 'starting' : 'warmup'
 	res.status(isStreamReady ? 200 : 503).json({

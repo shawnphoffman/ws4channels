@@ -2,5 +2,6 @@ node_modules
 output
 audio_list.txt
 .vs/
+.vscode/
 .claude
 .plans
