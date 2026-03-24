@@ -1,20 +1,39 @@
 FROM node:22-slim
 
-# Install FFmpeg, Chromium, and VA-API driver for Intel Arc (Meteor Lake+)
+# Shared libs for chrome-headless-shell + ffmpeg + VA-API drivers
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ffmpeg \
-	chromium \
 	mesa-va-drivers \
-	intel-media-va-driver \
+	ca-certificates \
+	fonts-liberation \
+	libasound2 \
+	libdrm2 \
+	libgbm1 \
+	libnspr4 \
+	libnss3 \
+	libx11-6 \
+	libxcb1 \
+	libxcomposite1 \
+	libxdamage1 \
+	libxext6 \
+	libxfixes3 \
+	libxrandr2 \
+	libxkbcommon0 \
+	&& (apt-get install -y --no-install-recommends intel-media-va-driver || true) \
 	&& rm -rf /var/lib/apt/lists/*
-
-# Use system Chromium instead of Puppeteer's bundled download
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
+
+# Download chrome-headless-shell matching puppeteer-core version
+RUN npm install -g @puppeteer/browsers \
+	&& browsers install chrome-headless-shell@stable --path /app/.chrome \
+	&& ln -s $(find /app/.chrome -name chrome-headless-shell -type f | head -1) /usr/local/bin/chrome-headless-shell \
+	&& npm uninstall -g @puppeteer/browsers \
+	&& npm cache clean --force
+
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-shell
 
 # Copy application code, music, and logo files
 COPY . .

@@ -113,7 +113,6 @@ let page = null
 let captureInterval = null
 let isStreamReady = false
 let isLive = false // true when Puppeteer frames are the source
-let isBrowserFrozen = false
 let isStartingBrowser = false
 let isLaunching = false
 let isInitialising = false // guard against concurrent initStream calls
@@ -480,41 +479,15 @@ function switchToWarmup() {
 	log.info('Switched back to warmup image')
 }
 
-// ─── Browser freeze / thaw ────────────────────────────────────────────────────
-
-function getBrowserPid() {
-	return browser?.process()?.pid ?? null
-}
-
-function freezeBrowser() {
-	const pid = getBrowserPid()
-	if (!pid || isBrowserFrozen) return
-	try {
-		process.kill(-pid, 'SIGSTOP')
-	} catch {
-		try {
-			process.kill(pid, 'SIGSTOP')
-		} catch {}
-	}
-	isBrowserFrozen = true
-	log.info(`Browser frozen (PID ${pid}) — zero CPU`)
-}
-
-function thawBrowser() {
-	const pid = getBrowserPid()
-	if (!pid || !isBrowserFrozen) return
-	try {
-		process.kill(-pid, 'SIGCONT')
-	} catch {
-		try {
-			process.kill(pid, 'SIGCONT')
-		} catch {}
-	}
-	isBrowserFrozen = false
-	log.info(`Browser thawed (PID ${pid})`)
-}
-
 // ─── Browser ─────────────────────────────────────────────────────────────────
+
+async function closeBrowser() {
+	if (!browser) return
+	await browser.close().catch(() => {})
+	browser = null
+	page = null
+	log.info('Browser closed — idle')
+}
 
 function buildWS4KPUrl() {
 	if (ZIP_CODE) return `${WS4KP_URL}/?zip=${encodeURIComponent(ZIP_CODE)}`
@@ -533,7 +506,7 @@ async function launchBrowser() {
 			args: [
 				'--no-sandbox',
 				'--disable-setuid-sandbox',
-				'--disable-dev-shm-usage',
+				'--disable-gpu',
 				'--disable-infobars',
 				'--ignore-certificate-errors',
 				'--window-size=1280,720',
@@ -553,8 +526,7 @@ async function launchBrowser() {
 			log.warn('Container not found, capturing anyway')
 		}
 		await page.setViewport({ width: 1280, height: 720 })
-		isBrowserFrozen = false
-		log.info(`Browser ready (PID ${getBrowserPid()})`)
+		log.info(`Browser ready (PID ${browser?.process()?.pid ?? '?'})`)
 	} finally {
 		isLaunching = false
 	}
@@ -564,25 +536,7 @@ async function startBrowserCapture() {
 	if (isStartingBrowser) return
 	isStartingBrowser = true
 	try {
-		if (isBrowserFrozen) {
-			thawBrowser()
-			await waitFor(200)
-			// Reload page after thaw — ws4kp's JS timers and fetches are stale
-			if (page && !page.isClosed()) {
-				log.info('Reloading page after thaw...')
-				await page.goto(buildWS4KPUrl(), { waitUntil: 'domcontentloaded', timeout: 15000 })
-				try {
-					await page.waitForSelector('div#container', { timeout: 15000 })
-					await waitFor(1000)
-				} catch {
-					log.warn('Container not found after thaw, capturing anyway')
-				}
-			} else {
-				await launchBrowser()
-			}
-		} else if (!browser) {
-			await launchBrowser()
-		}
+		await launchBrowser()
 
 		// DEBUG_SLEEP: keep warmup visible for N seconds after viewer triggers go-live
 		if (DEBUG_SLEEP_MS > 0) {
@@ -594,16 +548,16 @@ async function startBrowserCapture() {
 	} catch (err) {
 		log.error('Browser startup failed:', err.message)
 		switchToWarmup()
-		freezeBrowser()
+		await closeBrowser()
 	} finally {
 		isStartingBrowser = false
 	}
 }
 
 async function idleBrowser() {
-	log.info('No viewers — switching to warmup, freezing browser')
+	log.info('No viewers — switching to warmup, closing browser')
 	switchToWarmup()
-	freezeBrowser()
+	await closeBrowser()
 }
 
 async function stopEverything() {
@@ -616,12 +570,7 @@ async function stopEverything() {
 		clearInterval(captureInterval)
 		captureInterval = null
 	}
-	if (isBrowserFrozen) thawBrowser()
-	if (browser) {
-		await browser.close().catch(() => {})
-		browser = null
-		page = null
-	}
+	await closeBrowser()
 	if (ffmpegProc) {
 		// Record sequence number so a restart would continue from where we left off
 		try {
@@ -638,7 +587,7 @@ async function stopEverything() {
 		inputPipe.destroy()
 		inputPipe = null
 	}
-	isStreamReady = isLive = isBrowserFrozen = false
+	isStreamReady = isLive = false
 	log.info('Fully stopped.')
 }
 
@@ -755,12 +704,10 @@ poll();setInterval(poll,5000);
 })
 
 app.get('/health', (req, res) => {
-	const mode = isLive ? 'live' : isBrowserFrozen ? 'frozen' : browser ? 'starting' : 'warmup'
+	const mode = isLive ? 'live' : browser ? 'starting' : 'warmup'
 	res.status(isStreamReady ? 200 : 503).json({
 		ready: isStreamReady,
 		mode,
-		frozen: isBrowserFrozen,
-		browserPid: getBrowserPid(),
 		version: VERSION,
 		encoder: `${VIDEO_CONFIG.preset} (${VIDEO_CONFIG.codec})`,
 	})
@@ -788,19 +735,16 @@ app.listen(STREAM_PORT, async () => {
 	// Warmup is immediately playable once ffmpeg produces the first HLS segment.
 	await initStream()
 
-	// Pre-launch browser so it's ready when first viewer connects
+	// Launch browser or wait for first viewer
 	if (IDLE_TIMEOUT_MS <= 0) {
 		// Always-on: launch browser and go live immediately
 		await launchBrowser()
 		isBooting = false
 		startLiveCapture()
 	} else {
-		// Launch browser, freeze it, wait for first viewer to trigger go-live
-		log.info('Launching browser to pre-load, then freezing...')
-		await launchBrowser()
-		freezeBrowser()
+		// Wait for first viewer to trigger browser launch + go-live
 		isBooting = false
-		log.info('Ready. Warmup streaming. Browser frozen until first viewer.')
+		log.info('Ready. Warmup streaming. Browser launches on first viewer.')
 	}
 })
 

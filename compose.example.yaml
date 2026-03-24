@@ -74,8 +74,6 @@ services:
         condition: service_healthy
     devices:
       - /dev/dri:/dev/dri
-    cap_add:
-      - SYS_PTRACE
     environment:
       <<: *env
       WS4KP_HOST: ws4kp-fork
@@ -104,6 +102,4 @@ services:
     ports:
       - ${STREAM_PORT:-9798}:9798
     # ================================
-    healthcheck:
-      test: curl -f http://localhost:9798/guide.xml || exit 1
-      <<: *health
+    # Healthcheck is defined in the Dockerfile

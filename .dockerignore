@@ -3,6 +3,8 @@ output
 .git
 .github
 .claude
+.plans
+.chrome
 *.psd
 *.md
 compose.yaml
