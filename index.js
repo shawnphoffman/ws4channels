@@ -119,6 +119,7 @@ let isInitialising = false // guard against concurrent initStream calls
 let isBooting = true // true during boot sequence — prevents middleware from launching browser
 let idleTimer = null
 let restartDelay = 1000
+let browserFailures = 0
 let seqNumber = 0 // HLS sequence counter, increments across restarts
 
 const waitFor = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -532,11 +533,15 @@ async function launchBrowser() {
 	}
 }
 
+const MAX_BROWSER_FAILURES = 5
+const BROWSER_BACKOFF_BASE = 2000 // 2s, 4s, 8s, 16s, 32s
+
 async function startBrowserCapture() {
 	if (isStartingBrowser) return
 	isStartingBrowser = true
 	try {
 		await launchBrowser()
+		browserFailures = 0 // reset on success
 
 		// DEBUG_SLEEP: keep warmup visible for N seconds after viewer triggers go-live
 		if (DEBUG_SLEEP_MS > 0) {
@@ -546,12 +551,24 @@ async function startBrowserCapture() {
 
 		startLiveCapture()
 	} catch (err) {
-		log.error('Browser startup failed:', err.message)
+		browserFailures++
 		switchToWarmup()
 		await closeBrowser()
-	} finally {
-		isStartingBrowser = false
+
+		if (browserFailures >= MAX_BROWSER_FAILURES) {
+			log.error(`Browser failed ${browserFailures} times — crashing to avoid wasting resources`)
+			process.exit(1)
+		}
+
+		const delay = BROWSER_BACKOFF_BASE * 2 ** (browserFailures - 1)
+		log.error(`Browser startup failed (${browserFailures}/${MAX_BROWSER_FAILURES}): ${err.message} — retrying in ${delay / 1000}s`)
+		setTimeout(() => {
+			isStartingBrowser = false
+			startBrowserCapture()
+		}, delay)
+		return // skip the finally reset — the retry timer owns it now
 	}
+	isStartingBrowser = false
 }
 
 async function idleBrowser() {
