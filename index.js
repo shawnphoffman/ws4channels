@@ -67,7 +67,7 @@ const VIDEO_PRESETS = {
 	},
 	vaapi: {
 		codec: 'h264_vaapi',
-		outputArgs: ['-b:v', '500k'],
+		outputArgs: ['-b:v', '1500k', '-maxrate', '2000k', '-bufsize', '4000k'],
 		inputArgs: ['-vaapi_device', '/dev/dri/renderD128'],
 		vf: 'format=yuv420p,scale=1280:720,format=nv12,hwupload',
 	},
