@@ -519,10 +519,10 @@ async function launchBrowser() {
 		})
 		page = await browser.newPage()
 		await page.setCacheEnabled(false)
-		await page.goto(buildWS4KPUrl(), { waitUntil: 'domcontentloaded', timeout: 15000 })
+		await page.goto(buildWS4KPUrl(), { waitUntil: 'networkidle2', timeout: 30000 })
 		try {
-			await page.waitForSelector('div#container', { timeout: 15000 })
-			await waitFor(1000)
+			await page.waitForSelector('div#container', { timeout: 30000 })
+			await waitFor(3000)
 		} catch {
 			log.warn('Container not found, capturing anyway')
 		}
